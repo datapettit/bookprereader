@@ -348,10 +348,9 @@ function Invoke-OpenAITts {
             Remove-Item $OutputPath -Force
         }
         $errorDetails = New-Object System.Collections.Generic.List[string]
-        $redactedHeaders = @{ Authorization = 'Bearer ***' }
         $errorDetails.Add('OpenAI TTS request failed.')
         $errorDetails.Add(("Request URL: {0}" -f $uri))
-        $errorDetails.Add(("Request headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
+        $errorDetails.Add(("Request headers: {0}" -f ($headers | ConvertTo-Json -Depth 4)))
         $errorDetails.Add(("Request body: {0}" -f $body))
         $response = $_.Exception.Response
         if ($response) {
@@ -415,6 +414,79 @@ function Ensure-Ffmpeg {
     }
 
     return $localBinary
+}
+
+function Get-FfprobePath {
+    param([string]$FfmpegPath)
+
+    $probeCommand = Get-Command ffprobe -ErrorAction SilentlyContinue
+    if ($probeCommand) {
+        return $probeCommand.Source
+    }
+
+    if ($FfmpegPath) {
+        $ffmpegDir = Split-Path $FfmpegPath
+        $probeCandidate = Join-Path $ffmpegDir 'ffprobe.exe'
+        if (Test-Path $probeCandidate) {
+            return $probeCandidate
+        }
+    }
+
+    return $null
+}
+
+function Get-Mp3Duration {
+    param(
+        [string]$Path,
+        [string]$FfprobePath
+    )
+
+    if (-not $FfprobePath) {
+        return $null
+    }
+
+    try {
+        $durationText = & $FfprobePath -v error -show_entries format=duration -of default=nw=1:nk=1 $Path 2>$null
+        if ($durationText -and $durationText -match '^\d+(\.\d+)?$') {
+            return [double]$durationText
+        }
+    } catch {
+        return $null
+    }
+
+    return $null
+}
+
+function Write-Mp3Report {
+    param(
+        [string]$Path,
+        [bool]$Success,
+        [string]$FailureMessage,
+        [string]$FfprobePath
+    )
+
+    if (-not $Success) {
+        Write-ErrorMessage ("Final MP3 creation failed: {0}" -f $FailureMessage)
+        Write-ErrorMessage ("Expected output path: {0}" -f $Path)
+        return
+    }
+
+    if (-not (Test-Path $Path)) {
+        Write-ErrorMessage ("Final MP3 was not found at: {0}" -f $Path)
+        return
+    }
+
+    $item = Get-Item -Path $Path
+    $duration = Get-Mp3Duration -Path $Path -FfprobePath $FfprobePath
+    Write-Info 'Final MP3 details:'
+    Write-Info ("  Name: {0}" -f $item.Name)
+    Write-Info ("  Location: {0}" -f $item.FullName)
+    Write-Info ("  Size: {0} bytes ({1:N2} MB)" -f $item.Length, ($item.Length / 1MB))
+    if ($null -ne $duration) {
+        Write-Info ("  Length: {0:N2} seconds" -f $duration)
+    } else {
+        Write-Warn '  Length: unavailable (ffprobe not found).'
+    }
 }
 
 function Get-Mp3SortKey {
@@ -500,13 +572,18 @@ function Merge-Mp3Files {
 
     try {
         Write-Info ("Merging {0} chunks into {1}" -f $validFiles.Count, $OutputPath)
-        & $ffmpeg -y -f concat -safe 0 -i $listPath -c copy $OutputPath | Out-Null
+        $process = Start-Process -FilePath $ffmpeg -ArgumentList @('-y', '-f', 'concat', '-safe', '0', '-i', $listPath, '-c', 'copy', $OutputPath) -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw ("FFmpeg merge failed with exit code {0}." -f $process.ExitCode)
+        }
         Write-Success ("Merge complete: {0}" -f $OutputPath)
     } finally {
         if (Test-Path $listPath) {
             Remove-Item $listPath -Force
         }
     }
+
+    return $ffmpeg
 }
 
 function Choose-Model {
@@ -546,10 +623,7 @@ function Get-ApiKeyPreview {
     if ([string]::IsNullOrWhiteSpace($ApiKey)) {
         return '(not set)'
     }
-    if ($ApiKey.Length -le 8) {
-        return $ApiKey
-    }
-    return $ApiKey.Substring(0, 8) + '...'
+    return $ApiKey
 }
 
 $settings = Load-Settings
@@ -603,6 +677,9 @@ while ($true) {
                 $apiKey = Get-ApiKey -Settings $settings
                 Write-Info 'API key detected for TTS requests.'
                 $outputFiles = New-Object System.Collections.Generic.List[string]
+                $ffmpegPath = $null
+                $mergeSucceeded = $false
+                $mergeError = $null
 
                 for ($i = 0; $i -lt $chunks.Count; $i++) {
                     $index = $i + 1
@@ -616,10 +693,17 @@ while ($true) {
                 $finalPath = Join-Path $settings.WorkspaceFolder ("{0}.mp3" -f $chapterName)
                 if ($outputFiles.Count -gt 1) {
                     Write-Info 'Merging chunks into final MP3...'
-                    Merge-Mp3Files -Files $outputFiles -OutputPath $finalPath
-                    foreach ($file in $outputFiles) {
-                        Write-Info ("Removing temporary chunk: {0}" -f $file)
-                        Remove-Item $file -Force
+                    try {
+                        $ffmpegPath = Merge-Mp3Files -Files $outputFiles -OutputPath $finalPath
+                        $mergeSucceeded = $true
+                        foreach ($file in $outputFiles) {
+                            Write-Info ("Removing temporary chunk: {0}" -f $file)
+                            Remove-Item $file -Force
+                        }
+                    } catch {
+                        $mergeSucceeded = $false
+                        $mergeError = $_.Exception.Message
+                        Write-ErrorMessage ("Merge failed: {0}" -f $mergeError)
                     }
                 } else {
                     if (Test-Path $finalPath) {
@@ -628,11 +712,14 @@ while ($true) {
                     }
                     Write-Info ("Moving single chunk to final output: {0}" -f $finalPath)
                     Move-Item -Path $outputFiles[0] -Destination $finalPath
+                    $mergeSucceeded = $true
                 }
-                Write-Success ("Saved MP3: {0}" -f $finalPath)
+                $ffprobePath = Get-FfprobePath -FfmpegPath $ffmpegPath
+                Write-Mp3Report -Path $finalPath -Success $mergeSucceeded -FailureMessage $mergeError -FfprobePath $ffprobePath
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
             }
+            Read-Host 'Press Enter to return to the main menu'
         }
         '9' {
             Clear-HostSafe
@@ -671,6 +758,7 @@ while ($true) {
                 }
                 default { Write-Warn 'Unknown settings option.' }
             }
+            Read-Host 'Press Enter to return to the main menu'
         }
         '0' { break }
         default { Write-Warn 'Invalid selection.' }
