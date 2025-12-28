@@ -12,6 +12,26 @@ if ($env:OS -eq 'Windows_NT') {
     $IsWindows = $true
 }
 
+function Write-Info {
+    param([string]$Message)
+    Write-Host $Message -ForegroundColor Cyan
+}
+
+function Write-Warn {
+    param([string]$Message)
+    Write-Host $Message -ForegroundColor Yellow
+}
+
+function Write-ErrorMessage {
+    param([string]$Message)
+    Write-Host $Message -ForegroundColor Red
+}
+
+function Write-Success {
+    param([string]$Message)
+    Write-Host $Message -ForegroundColor Green
+}
+
 function Get-DefaultSettings {
     return [ordered]@{
         WorkspaceFolder = 'C:\git\'
@@ -59,7 +79,8 @@ function Get-ApiKey {
 }
 
 function Select-Voice {
-    Write-Host 'Select a voice model:'
+    Clear-Host
+    Write-Info 'Select a voice model:'
     for ($i = 0; $i -lt $SupportedVoices.Count; $i++) {
         Write-Host ("  {0}) {1}" -f ($i + 1), $SupportedVoices[$i])
     }
@@ -71,19 +92,22 @@ function Select-Voice {
         if ($inputValue -match '^\d+$') {
             $index = [int]$inputValue - 1
             if ($index -ge 0 -and $index -lt $SupportedVoices.Count) {
+                Write-Success ("Selected voice: {0}" -f $SupportedVoices[$index])
                 return $SupportedVoices[$index]
             }
         }
         $match = $SupportedVoices | Where-Object { $_ -eq $inputValue.ToLowerInvariant() }
         if ($match) {
+            Write-Success ("Selected voice: {0}" -f $match)
             return $match
         }
-        Write-Host 'Invalid selection. Try again.'
+        Write-Warn 'Invalid selection. Try again.'
     }
 }
 
 function Select-InputMethod {
-    Write-Host 'Input method:'
+    Clear-Host
+    Write-Info 'Input method:'
     Write-Host '  1) File upload'
     Write-Host '  2) Paste text'
     while ($true) {
@@ -94,7 +118,7 @@ function Select-InputMethod {
             'file' { return 'file' }
             'text' { return 'text' }
         }
-        Write-Host 'Invalid selection. Enter 1, 2, file, or text.'
+        Write-Warn 'Invalid selection. Enter 1, 2, file, or text.'
     }
 }
 
@@ -102,7 +126,7 @@ function Select-InputFile {
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     } catch {
-        Write-Host 'File dialog not available. Falling back to manual path entry.'
+        Write-Warn 'File dialog not available. Falling back to manual path entry.'
     }
 
     if ([System.Type]::GetType('System.Windows.Forms.OpenFileDialog')) {
@@ -195,7 +219,7 @@ function Get-TextFromFile {
 }
 
 function Read-PastedText {
-    Write-Host 'Paste text below. Enter a single line with END to finish.'
+    Write-Info 'Paste text below. Enter a single line with END to finish.'
     $lines = New-Object System.Collections.Generic.List[string]
     while ($true) {
         $line = Read-Host
@@ -324,7 +348,7 @@ function Ensure-Ffmpeg {
         throw 'FFmpeg is required to merge MP3 files. Install ffmpeg and ensure it is in PATH.'
     }
 
-    Write-Host 'FFmpeg not found. Downloading a free build from gyan.dev...'
+    Write-Warn 'FFmpeg not found. Downloading a free build from gyan.dev...'
     $zipPath = Join-Path $ScriptRoot 'ffmpeg.zip'
     try {
         Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zipPath -ErrorAction Stop
@@ -351,6 +375,50 @@ function Ensure-Ffmpeg {
     return $localBinary
 }
 
+function Get-Mp3SortKey {
+    param([string]$Path)
+
+    $fileName = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    if ($fileName -match '(\d+)$') {
+        return [int]$Matches[1]
+    }
+    return [int]::MaxValue
+}
+
+function Test-Mp3File {
+    param(
+        [string]$Path,
+        [string]$FfmpegPath
+    )
+
+    if (-not (Test-Path $Path)) {
+        Write-Warn ("MP3 missing: {0}" -f $Path)
+        return $false
+    }
+
+    $length = (Get-Item $Path).Length
+    Write-Info ("MP3 size check: {0} bytes ({1})" -f $length, $Path)
+    if ($length -le 0) {
+        Write-Warn ("MP3 has zero size and will be skipped: {0}" -f $Path)
+        return $false
+    }
+
+    if (-not $FfmpegPath) {
+        Write-Warn ("Skipping MP3 validation (ffmpeg missing): {0}" -f $Path)
+        return $true
+    }
+
+    Write-Info ("Validating MP3 with ffmpeg: {0}" -f $Path)
+    $process = Start-Process -FilePath $FfmpegPath -ArgumentList @('-v', 'error', '-i', $Path, '-f', 'null', '-') -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        Write-Warn ("MP3 validation failed (ffmpeg exit {0}): {1}" -f $process.ExitCode, $Path)
+        return $false
+    }
+
+    Write-Success ("MP3 validation passed: {0}" -f $Path)
+    return $true
+}
+
 function Merge-Mp3Files {
     param(
         [string[]]$Files,
@@ -358,8 +426,30 @@ function Merge-Mp3Files {
     )
 
     $ffmpeg = Ensure-Ffmpeg
+    Write-Info ("FFmpeg path: {0}" -f $ffmpeg)
+
+    Write-Info 'Ordering MP3 chunks by numeric suffix...'
+    $orderedFiles = $Files | Sort-Object { Get-Mp3SortKey -Path $_ }
+    foreach ($file in $orderedFiles) {
+        Write-Info ("  Ordered chunk: {0}" -f $file)
+    }
+
+    Write-Info 'Validating MP3 chunks before merge...'
+    $validFiles = New-Object System.Collections.Generic.List[string]
+    foreach ($file in $orderedFiles) {
+        if (Test-Mp3File -Path $file -FfmpegPath $ffmpeg) {
+            $validFiles.Add($file)
+        } else {
+            Write-Warn ("Skipping invalid MP3 chunk: {0}" -f $file)
+        }
+    }
+
+    if ($validFiles.Count -eq 0) {
+        throw 'No valid MP3 chunks remain after validation.'
+    }
+
     $listPath = Join-Path $ScriptRoot ('ffmpeg-list-' + [Guid]::NewGuid().ToString('N') + '.txt')
-    $content = $Files | ForEach-Object { "file '$($_.Replace("'", "''"))'" }
+    $content = $validFiles | ForEach-Object { "file '$($_.Replace("'", "''"))'" }
     Set-Content -Path $listPath -Value $content -Encoding UTF8
 
     if (Test-Path $OutputPath) {
@@ -367,7 +457,9 @@ function Merge-Mp3Files {
     }
 
     try {
+        Write-Info ("Merging {0} chunks into {1}" -f $validFiles.Count, $OutputPath)
         & $ffmpeg -y -f concat -safe 0 -i $listPath -c copy $OutputPath | Out-Null
+        Write-Success ("Merge complete: {0}" -f $OutputPath)
     } finally {
         if (Test-Path $listPath) {
             Remove-Item $listPath -Force
@@ -378,7 +470,8 @@ function Merge-Mp3Files {
 function Choose-Model {
     param([object]$Settings)
 
-    Write-Host 'Select a TTS model:'
+    Clear-Host
+    Write-Info 'Select a TTS model:'
     for ($i = 0; $i -lt $SupportedModels.Count; $i++) {
         Write-Host ("  {0}) {1}" -f ($i + 1), $SupportedModels[$i])
     }
@@ -391,15 +484,17 @@ function Choose-Model {
             $index = [int]$inputValue - 1
             if ($index -ge 0 -and $index -lt $SupportedModels.Count) {
                 $Settings.Model = $SupportedModels[$index]
+                Write-Success ("Selected model: {0}" -f $Settings.Model)
                 return
             }
         }
         $match = $SupportedModels | Where-Object { $_ -eq $inputValue }
         if ($match) {
             $Settings.Model = $match
+            Write-Success ("Selected model: {0}" -f $Settings.Model)
             return
         }
-        Write-Host 'Invalid selection. Try again.'
+        Write-Warn 'Invalid selection. Try again.'
     }
 }
 
@@ -420,8 +515,8 @@ Ensure-WorkspaceFolder -Path $settings.WorkspaceFolder
 Save-Settings -Settings $settings
 
 while ($true) {
-    Write-Host ''
-    Write-Host 'Main Menu'
+    Clear-Host
+    Write-Info 'Main Menu'
     Write-Host '1) Create audio from file'
     Write-Host '9) Settings'
     Write-Host '0) Exit'
@@ -431,63 +526,75 @@ while ($true) {
         '1' {
             $chapterName = (Read-Host 'Chapter name').Trim()
             if (-not $chapterName) {
-                Write-Host 'Chapter name cannot be blank.'
+                Write-Warn 'Chapter name cannot be blank.'
                 break
             }
 
+            Write-Info ("Chapter name set to: {0}" -f $chapterName)
             $voice = Select-Voice
             $inputMethod = Select-InputMethod
 
             if ($inputMethod -eq 'file') {
+                Write-Info 'Input method selected: file upload'
                 $filePath = Select-InputFile
+                Write-Info ("Reading input file: {0}" -f $filePath)
                 $inputText = Get-TextFromFile -Path $filePath
             } else {
+                Write-Info 'Input method selected: paste text'
                 $inputText = Read-PastedText
             }
 
             $inputText = $inputText.Trim()
             if (-not $inputText) {
-                Write-Host 'No text provided.'
+                Write-Warn 'No text provided.'
                 break
             }
 
             try {
+                Write-Info 'Splitting text into chunks...'
                 $chunks = Split-TextIntoChunks -Text $inputText -Limit $MaxInputCharacters
                 if ($chunks.Count -eq 0) {
-                    Write-Host 'No usable text detected after splitting.'
+                    Write-Warn 'No usable text detected after splitting.'
                     break
                 }
+                Write-Success ("Prepared {0} chunks for TTS." -f $chunks.Count)
                 $apiKey = Get-ApiKey -Settings $settings
+                Write-Info 'API key detected for TTS requests.'
                 $outputFiles = New-Object System.Collections.Generic.List[string]
 
                 for ($i = 0; $i -lt $chunks.Count; $i++) {
                     $index = $i + 1
                     $chunkPath = Join-Path $settings.WorkspaceFolder ("{0}_{1}.mp3" -f $chapterName, $index)
-                    Write-Host ("Creating audio chunk {0}/{1}..." -f $index, $chunks.Count)
+                    Write-Info ("Creating audio chunk {0}/{1} -> {2}" -f $index, $chunks.Count, $chunkPath)
                     Invoke-OpenAITts -Text $chunks[$i] -Voice $voice -Model $settings.Model -ApiKey $apiKey -OutputPath $chunkPath
+                    Write-Success ("Chunk created: {0}" -f $chunkPath)
                     $outputFiles.Add($chunkPath)
                 }
 
                 $finalPath = Join-Path $settings.WorkspaceFolder ("{0}.mp3" -f $chapterName)
                 if ($outputFiles.Count -gt 1) {
-                    Write-Host 'Merging chunks into final MP3...'
+                    Write-Info 'Merging chunks into final MP3...'
                     Merge-Mp3Files -Files $outputFiles -OutputPath $finalPath
                     foreach ($file in $outputFiles) {
+                        Write-Info ("Removing temporary chunk: {0}" -f $file)
                         Remove-Item $file -Force
                     }
                 } else {
                     if (Test-Path $finalPath) {
+                        Write-Info ("Removing existing output file: {0}" -f $finalPath)
                         Remove-Item $finalPath -Force
                     }
+                    Write-Info ("Moving single chunk to final output: {0}" -f $finalPath)
                     Move-Item -Path $outputFiles[0] -Destination $finalPath
                 }
-                Write-Host "Saved MP3: $finalPath"
+                Write-Success ("Saved MP3: {0}" -f $finalPath)
             } catch {
-                Write-Host "Error: $($_.Exception.Message)"
+                Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
             }
         }
         '9' {
-            Write-Host 'Settings:'
+            Clear-Host
+            Write-Info 'Settings:'
             Write-Host ("  Workspace folder: {0}" -f $settings.WorkspaceFolder)
             Write-Host ("  Model: {0}" -f $settings.Model)
             Write-Host ("  API key: {0}" -f (Get-ApiKeyPreview -ApiKey $settings.ApiKey))
@@ -499,9 +606,11 @@ while ($true) {
                 'a' {
                     $newPath = Read-Host 'Enter new workspace folder'
                     if ($newPath) {
+                        Write-Info ("Updating workspace folder to: {0}" -f $newPath)
                         $settings.WorkspaceFolder = $newPath
                         Ensure-WorkspaceFolder -Path $settings.WorkspaceFolder
                         Save-Settings -Settings $settings
+                        Write-Success 'Workspace folder updated.'
                     }
                 }
                 'b' {
@@ -511,15 +620,17 @@ while ($true) {
                 'c' {
                     $newKey = Read-Host 'Enter new API key'
                     if ($newKey) {
+                        Write-Info 'Updating API key in settings.'
                         $settings.ApiKey = $newKey
                         $env:OPENAI_API_KEY = $newKey
                         Save-Settings -Settings $settings
+                        Write-Success 'API key updated.'
                     }
                 }
-                default { Write-Host 'Unknown settings option.' }
+                default { Write-Warn 'Unknown settings option.' }
             }
         }
         '0' { break }
-        default { Write-Host 'Invalid selection.' }
+        default { Write-Warn 'Invalid selection.' }
     }
 }
