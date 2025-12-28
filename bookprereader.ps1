@@ -5,6 +5,7 @@ $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 4096
 $SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
 $SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
+$EnableClearHost = $false
 $IsWindows = $false
 if ($env:OS -eq 'Windows_NT') {
     $IsWindows = $true
@@ -30,6 +31,12 @@ function Write-ErrorMessage {
 function Write-Success {
     param([string]$Message)
     Write-Host $Message -ForegroundColor Green
+}
+
+function Clear-HostSafe {
+    if ($EnableClearHost) {
+        Clear-Host
+    }
 }
 
 function Get-DefaultSettings {
@@ -79,7 +86,7 @@ function Get-ApiKey {
 }
 
 function Select-Voice {
-    Clear-Host
+    Clear-HostSafe
     Write-Info 'Select a voice model:'
     for ($i = 0; $i -lt $SupportedVoices.Count; $i++) {
         Write-Host ("  {0}) {1}" -f ($i + 1), $SupportedVoices[$i])
@@ -106,7 +113,7 @@ function Select-Voice {
 }
 
 function Select-InputMethod {
-    Clear-Host
+    Clear-HostSafe
     Write-Info 'Input method:'
     Write-Host '  1) File upload'
     Write-Host '  2) Paste text'
@@ -142,10 +149,26 @@ function Select-InputFile {
     }
 
     $manualPath = Read-Host 'Enter the full path to the input file'
-    if (-not (Test-Path $manualPath)) {
+    $manualPath = Normalize-InputPath -Path $manualPath
+    if (-not (Test-Path -LiteralPath $manualPath)) {
         throw "File not found: $manualPath"
     }
     return $manualPath
+}
+
+function Normalize-InputPath {
+    param([string]$Path)
+
+    if ($null -eq $Path) {
+        return $Path
+    }
+    $trimmed = $Path.Trim()
+    if ($trimmed.Length -ge 2) {
+        if (($trimmed.StartsWith('"') -and $trimmed.EndsWith('"')) -or ($trimmed.StartsWith("'") -and $trimmed.EndsWith("'"))) {
+            $trimmed = $trimmed.Substring(1, $trimmed.Length - 2)
+        }
+    }
+    return $trimmed
 }
 
 function Get-TextFromDocx {
@@ -304,31 +327,50 @@ function Invoke-OpenAITts {
         [string]$OutputPath
     )
 
+    $uri = 'https://api.openai.com/v1/audio/speech'
     $headers = @{ Authorization = "Bearer $ApiKey" }
-    $body = @{
+    $bodyObject = @{
         model = $Model
         input = $Text
         voice = $Voice
         format = 'mp3'
-    } | ConvertTo-Json -Depth 4
+    }
+    $body = $bodyObject | ConvertTo-Json -Depth 4
 
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
     }
 
     try {
-        Invoke-WebRequest -Method Post -Uri 'https://api.openai.com/v1/audio/speech' -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
+        Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
     } catch {
         if (Test-Path $OutputPath) {
             Remove-Item $OutputPath -Force
         }
+        $errorDetails = New-Object System.Collections.Generic.List[string]
+        $redactedHeaders = @{ Authorization = 'Bearer ***' }
+        $errorDetails.Add('OpenAI TTS request failed.')
+        $errorDetails.Add(("Request URL: {0}" -f $uri))
+        $errorDetails.Add(("Request headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
+        $errorDetails.Add(("Request body: {0}" -f $body))
         $response = $_.Exception.Response
-        if ($response -and $response.GetResponseStream()) {
-            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-            $details = $reader.ReadToEnd()
-            throw "OpenAI TTS request failed: $details"
+        if ($response) {
+            $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
+            $errorDetails.Add(("Response headers: {0}" -f ($response.Headers | ConvertTo-Json -Depth 4)))
+            if ($response.GetResponseStream()) {
+                $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+                try {
+                    $details = $reader.ReadToEnd()
+                    if ($details) {
+                        $errorDetails.Add(("Response body: {0}" -f $details))
+                    }
+                } finally {
+                    $reader.Close()
+                }
+            }
         }
-        throw
+        $errorDetails.Add(("Exception: {0}" -f $_.Exception.Message))
+        throw ($errorDetails -join [Environment]::NewLine)
     }
 }
 
@@ -470,7 +512,7 @@ function Merge-Mp3Files {
 function Choose-Model {
     param([object]$Settings)
 
-    Clear-Host
+    Clear-HostSafe
     Write-Info 'Select a TTS model:'
     for ($i = 0; $i -lt $SupportedModels.Count; $i++) {
         Write-Host ("  {0}) {1}" -f ($i + 1), $SupportedModels[$i])
@@ -515,7 +557,7 @@ Ensure-WorkspaceFolder -Path $settings.WorkspaceFolder
 Save-Settings -Settings $settings
 
 while ($true) {
-    Clear-Host
+    Clear-HostSafe
     Write-Info 'Main Menu'
     Write-Host '1) Create audio from file'
     Write-Host '9) Settings'
@@ -593,7 +635,7 @@ while ($true) {
             }
         }
         '9' {
-            Clear-Host
+            Clear-HostSafe
             Write-Info 'Settings:'
             Write-Host ("  Workspace folder: {0}" -f $settings.WorkspaceFolder)
             Write-Host ("  Model: {0}" -f $settings.Model)
