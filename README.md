@@ -6,13 +6,13 @@ text to audio book via tts on openai
 `bookprereader.ps1` provides an interactive PowerShell menu for creating MP3 audio from draft text using OpenAI TTS.
 
 ### Requirements
-- PowerShell 7+
+- Windows PowerShell 5.1+ (PowerShell 7+ also supported)
 - An OpenAI API key in `OPENAI_API_KEY` (or update it in the Settings menu)
 - Word `.doc` extraction requires Microsoft Word installed (the script can read `.docx`, `.rtf`, and `.txt` without Word).
 
 ### Usage
 ```powershell
-pwsh .\bookprereader.ps1
+powershell .\bookprereader.ps1
 ```
 
 ### Input limits
