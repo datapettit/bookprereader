@@ -1,5 +1,3 @@
-#Requires -Version 7.0
-
 $ErrorActionPreference = 'Stop'
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -7,6 +5,12 @@ $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 4096
 $SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
 $SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
+$IsWindows = $false
+if ($env:OS -eq 'Windows_NT') {
+    $IsWindows = $true
+} elseif ($PSVersionTable.PSEdition -eq 'Desktop') {
+    $IsWindows = $true
+}
 
 function Get-DefaultSettings {
     return [ordered]@{
