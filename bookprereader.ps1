@@ -80,6 +80,14 @@ function Get-ApiKey {
     param([object]$Settings)
 
     $candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
+    if ($candidate) {
+        $candidate = $candidate.Trim()
+        if ($candidate.Length -ge 2) {
+            if (($candidate.StartsWith('"') -and $candidate.EndsWith('"')) -or ($candidate.StartsWith("'") -and $candidate.EndsWith("'"))) {
+                $candidate = $candidate.Substring(1, $candidate.Length - 2)
+            }
+        }
+    }
     if ([string]::IsNullOrWhiteSpace($candidate)) {
         throw 'OpenAI API key is missing. Set OPENAI_API_KEY or update it in Settings.'
     }
@@ -377,15 +385,6 @@ function Invoke-OpenAITts {
     }
     $body = $bodyObject | ConvertTo-Json -Depth 4
 
-    $sanitizedHeaders = @{}
-    foreach ($key in $headers.Keys) {
-        if ($key -eq 'Authorization') {
-            $sanitizedHeaders[$key] = 'Bearer (redacted)'
-        } else {
-            $sanitizedHeaders[$key] = $headers[$key]
-        }
-    }
-
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
     }
@@ -399,7 +398,7 @@ function Invoke-OpenAITts {
         $errorDetails = New-Object System.Collections.Generic.List[string]
         $errorDetails.Add('OpenAI TTS request failed.')
         $errorDetails.Add(("Request URL: {0}" -f $uri))
-        $errorDetails.Add(("Request headers: {0}" -f ($sanitizedHeaders | ConvertTo-Json -Depth 4)))
+        $errorDetails.Add(("Request headers: {0}" -f ($headers | ConvertTo-Json -Depth 4)))
         $errorDetails.Add(("Request body: {0}" -f $body))
         $response = $_.Exception.Response
         if ($response) {
