@@ -5,6 +5,7 @@ $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 4096
 $SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
 $SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
+$DefaultApiKey = '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'
 $EnableClearHost = $false
 $IsWindows = $false
 if ($env:OS -eq 'Windows_NT') {
@@ -43,7 +44,7 @@ function Get-DefaultSettings {
     return [ordered]@{
         WorkspaceFolder = 'C:\git\'
         Model = 'gpt-4o-mini-tts'
-        ApiKey = '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'
+        ApiKey = $DefaultApiKey
     }
 }
 
@@ -117,15 +118,18 @@ function Select-InputMethod {
     Write-Info 'Input method:'
     Write-Host '  1) File upload'
     Write-Host '  2) Paste text'
+    Write-Host '  3) Folder'
     while ($true) {
-        $inputValue = (Read-Host 'Choose file or text').Trim().ToLowerInvariant()
+        $inputValue = (Read-Host 'Choose input type').Trim().ToLowerInvariant()
         switch ($inputValue) {
             '1' { return 'file' }
             '2' { return 'text' }
+            '3' { return 'folder' }
             'file' { return 'file' }
             'text' { return 'text' }
+            'folder' { return 'folder' }
         }
-        Write-Warn 'Invalid selection. Enter 1, 2, file, or text.'
+        Write-Warn 'Invalid selection. Enter 1, 2, 3, file, text, or folder.'
     }
 }
 
@@ -154,6 +158,19 @@ function Select-InputFile {
         throw "File not found: $manualPath"
     }
     return $manualPath
+}
+
+function Select-InputFolder {
+    $manualPath = Read-Host 'Enter the full path to the folder'
+    $manualPath = Normalize-InputPath -Path $manualPath
+    if (-not (Test-Path -LiteralPath $manualPath)) {
+        throw "Folder not found: $manualPath"
+    }
+    $item = Get-Item -LiteralPath $manualPath
+    if (-not $item.PSIsContainer) {
+        throw "Path is not a folder: $manualPath"
+    }
+    return $item.FullName
 }
 
 function Normalize-InputPath {
@@ -239,6 +256,29 @@ function Get-TextFromFile {
         '.doc' { return Get-TextFromWordDoc -Path $Path }
         default { throw "Unsupported file extension: $extension" }
     }
+}
+
+function Get-InputFilesFromFolder {
+    param([string]$FolderPath)
+
+    $extensions = @('*.txt', '*.text', '*.rtf', '*.doc', '*.docx')
+    $files = Get-ChildItem -Path $FolderPath -File -Recurse -Include $extensions | Sort-Object FullName
+    return $files
+}
+
+function Get-ChapterNameFromFile {
+    param([string]$FilePath)
+
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $normalized = $baseName -replace '[^a-zA-Z0-9]', ''
+    return $normalized
+}
+
+function Get-ChapterNameFromInput {
+    param([string]$InputName)
+
+    $normalized = $InputName -replace '[^a-zA-Z0-9]', ''
+    return $normalized
 }
 
 function Read-PastedText {
@@ -337,6 +377,15 @@ function Invoke-OpenAITts {
     }
     $body = $bodyObject | ConvertTo-Json -Depth 4
 
+    $sanitizedHeaders = @{}
+    foreach ($key in $headers.Keys) {
+        if ($key -eq 'Authorization') {
+            $sanitizedHeaders[$key] = 'Bearer (redacted)'
+        } else {
+            $sanitizedHeaders[$key] = $headers[$key]
+        }
+    }
+
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
     }
@@ -350,12 +399,15 @@ function Invoke-OpenAITts {
         $errorDetails = New-Object System.Collections.Generic.List[string]
         $errorDetails.Add('OpenAI TTS request failed.')
         $errorDetails.Add(("Request URL: {0}" -f $uri))
-        $errorDetails.Add(("Request headers: {0}" -f ($headers | ConvertTo-Json -Depth 4)))
+        $errorDetails.Add(("Request headers: {0}" -f ($sanitizedHeaders | ConvertTo-Json -Depth 4)))
         $errorDetails.Add(("Request body: {0}" -f $body))
         $response = $_.Exception.Response
         if ($response) {
             $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
             $errorDetails.Add(("Response headers: {0}" -f ($response.Headers | ConvertTo-Json -Depth 4)))
+            if ($response.Headers['x-request-id']) {
+                $errorDetails.Add(("OpenAI request id: {0}" -f $response.Headers['x-request-id']))
+            }
             if ($response.GetResponseStream()) {
                 $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
                 try {
@@ -368,7 +420,8 @@ function Invoke-OpenAITts {
                 }
             }
         }
-        $errorDetails.Add(("Exception: {0}" -f $_.Exception.Message))
+        $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
+        $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
         throw ($errorDetails -join [Environment]::NewLine)
     }
 }
@@ -626,6 +679,76 @@ function Get-ApiKeyPreview {
     return $ApiKey
 }
 
+function Invoke-TtsForText {
+    param(
+        [string]$ChapterName,
+        [string]$InputText,
+        [string]$Voice,
+        [object]$Settings
+    )
+
+    $cleanName = Get-ChapterNameFromInput -InputName $ChapterName
+    if (-not $cleanName) {
+        throw 'Chapter name cannot be blank after cleaning.'
+    }
+
+    $text = $InputText.Trim()
+    if (-not $text) {
+        throw 'No text provided.'
+    }
+
+    Write-Info ("Chapter name set to: {0}" -f $cleanName)
+    Write-Info 'Splitting text into chunks...'
+    $chunks = Split-TextIntoChunks -Text $text -Limit $MaxInputCharacters
+    if ($chunks.Count -eq 0) {
+        throw 'No usable text detected after splitting.'
+    }
+    Write-Success ("Prepared {0} chunks for TTS." -f $chunks.Count)
+    $apiKey = Get-ApiKey -Settings $Settings
+    Write-Info 'API key detected for TTS requests.'
+
+    $outputFiles = New-Object System.Collections.Generic.List[string]
+    $ffmpegPath = $null
+    $mergeSucceeded = $false
+    $mergeError = $null
+
+    for ($i = 0; $i -lt $chunks.Count; $i++) {
+        $index = $i + 1
+        $chunkPath = Join-Path $Settings.WorkspaceFolder ("{0}_{1}.mp3" -f $cleanName, $index)
+        Write-Info ("Creating audio chunk {0}/{1} -> {2}" -f $index, $chunks.Count, $chunkPath)
+        Invoke-OpenAITts -Text $chunks[$i] -Voice $voice -Model $Settings.Model -ApiKey $apiKey -OutputPath $chunkPath
+        Write-Success ("Chunk created: {0}" -f $chunkPath)
+        $outputFiles.Add($chunkPath)
+    }
+
+    $finalPath = Join-Path $Settings.WorkspaceFolder ("{0}.mp3" -f $cleanName)
+    if ($outputFiles.Count -gt 1) {
+        Write-Info 'Merging chunks into final MP3...'
+        try {
+            $ffmpegPath = Merge-Mp3Files -Files $outputFiles -OutputPath $finalPath
+            $mergeSucceeded = $true
+            foreach ($file in $outputFiles) {
+                Write-Info ("Removing temporary chunk: {0}" -f $file)
+                Remove-Item $file -Force
+            }
+        } catch {
+            $mergeSucceeded = $false
+            $mergeError = $_.Exception.Message
+            Write-ErrorMessage ("Merge failed: {0}" -f $mergeError)
+        }
+    } else {
+        if (Test-Path $finalPath) {
+            Write-Info ("Removing existing output file: {0}" -f $finalPath)
+            Remove-Item $finalPath -Force
+        }
+        Write-Info ("Moving single chunk to final output: {0}" -f $finalPath)
+        Move-Item -Path $outputFiles[0] -Destination $finalPath
+        $mergeSucceeded = $true
+    }
+    $ffprobePath = Get-FfprobePath -FfmpegPath $ffmpegPath
+    Write-Mp3Report -Path $finalPath -Success $mergeSucceeded -FailureMessage $mergeError -FfprobePath $ffprobePath
+}
+
 $settings = Load-Settings
 Ensure-WorkspaceFolder -Path $settings.WorkspaceFolder
 Save-Settings -Settings $settings
@@ -633,89 +756,53 @@ Save-Settings -Settings $settings
 while ($true) {
     Clear-HostSafe
     Write-Info 'Main Menu'
-    Write-Host '1) Create audio from file'
+    Write-Host '1) Create audio'
     Write-Host '9) Settings'
     Write-Host '0) Exit'
     $selection = (Read-Host 'Choose an option').Trim()
 
     switch ($selection) {
         '1' {
-            $chapterName = (Read-Host 'Chapter name').Trim()
-            if (-not $chapterName) {
-                Write-Warn 'Chapter name cannot be blank.'
-                break
-            }
-
-            Write-Info ("Chapter name set to: {0}" -f $chapterName)
             $voice = Select-Voice
             $inputMethod = Select-InputMethod
 
-            if ($inputMethod -eq 'file') {
-                Write-Info 'Input method selected: file upload'
-                $filePath = Select-InputFile
-                Write-Info ("Reading input file: {0}" -f $filePath)
-                $inputText = Get-TextFromFile -Path $filePath
-            } else {
-                Write-Info 'Input method selected: paste text'
-                $inputText = Read-PastedText
-            }
-
-            $inputText = $inputText.Trim()
-            if (-not $inputText) {
-                Write-Warn 'No text provided.'
-                break
-            }
-
             try {
-                Write-Info 'Splitting text into chunks...'
-                $chunks = Split-TextIntoChunks -Text $inputText -Limit $MaxInputCharacters
-                if ($chunks.Count -eq 0) {
-                    Write-Warn 'No usable text detected after splitting.'
-                    break
-                }
-                Write-Success ("Prepared {0} chunks for TTS." -f $chunks.Count)
-                $apiKey = Get-ApiKey -Settings $settings
-                Write-Info 'API key detected for TTS requests.'
-                $outputFiles = New-Object System.Collections.Generic.List[string]
-                $ffmpegPath = $null
-                $mergeSucceeded = $false
-                $mergeError = $null
-
-                for ($i = 0; $i -lt $chunks.Count; $i++) {
-                    $index = $i + 1
-                    $chunkPath = Join-Path $settings.WorkspaceFolder ("{0}_{1}.mp3" -f $chapterName, $index)
-                    Write-Info ("Creating audio chunk {0}/{1} -> {2}" -f $index, $chunks.Count, $chunkPath)
-                    Invoke-OpenAITts -Text $chunks[$i] -Voice $voice -Model $settings.Model -ApiKey $apiKey -OutputPath $chunkPath
-                    Write-Success ("Chunk created: {0}" -f $chunkPath)
-                    $outputFiles.Add($chunkPath)
-                }
-
-                $finalPath = Join-Path $settings.WorkspaceFolder ("{0}.mp3" -f $chapterName)
-                if ($outputFiles.Count -gt 1) {
-                    Write-Info 'Merging chunks into final MP3...'
-                    try {
-                        $ffmpegPath = Merge-Mp3Files -Files $outputFiles -OutputPath $finalPath
-                        $mergeSucceeded = $true
-                        foreach ($file in $outputFiles) {
-                            Write-Info ("Removing temporary chunk: {0}" -f $file)
-                            Remove-Item $file -Force
+                if ($inputMethod -eq 'file') {
+                    Write-Info 'Input method selected: file upload'
+                    $filePath = Select-InputFile
+                    $chapterName = Get-ChapterNameFromFile -FilePath $filePath
+                    Write-Info ("Reading input file: {0}" -f $filePath)
+                    $inputText = Get-TextFromFile -Path $filePath
+                    Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
+                } elseif ($inputMethod -eq 'folder') {
+                    Write-Info 'Input method selected: folder'
+                    $folderPath = Select-InputFolder
+                    Write-Info ("Scanning folder: {0}" -f $folderPath)
+                    $files = Get-InputFilesFromFolder -FolderPath $folderPath
+                    if (-not $files -or $files.Count -eq 0) {
+                        Write-Warn 'No supported files found in the selected folder.'
+                        break
+                    }
+                    foreach ($file in $files) {
+                        $chapterName = Get-ChapterNameFromFile -FilePath $file.FullName
+                        if (-not $chapterName) {
+                            Write-Warn ("Skipping file with empty chapter name after cleaning: {0}" -f $file.FullName)
+                            continue
                         }
-                    } catch {
-                        $mergeSucceeded = $false
-                        $mergeError = $_.Exception.Message
-                        Write-ErrorMessage ("Merge failed: {0}" -f $mergeError)
+                        Write-Info ("Reading input file: {0}" -f $file.FullName)
+                        $inputText = Get-TextFromFile -Path $file.FullName
+                        Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
                     }
                 } else {
-                    if (Test-Path $finalPath) {
-                        Write-Info ("Removing existing output file: {0}" -f $finalPath)
-                        Remove-Item $finalPath -Force
+                    Write-Info 'Input method selected: paste text'
+                    $chapterName = (Read-Host 'Chapter name').Trim()
+                    if (-not $chapterName) {
+                        Write-Warn 'Chapter name cannot be blank.'
+                        break
                     }
-                    Write-Info ("Moving single chunk to final output: {0}" -f $finalPath)
-                    Move-Item -Path $outputFiles[0] -Destination $finalPath
-                    $mergeSucceeded = $true
+                    $inputText = Read-PastedText
+                    Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
                 }
-                $ffprobePath = Get-FfprobePath -FfmpegPath $ffmpegPath
-                Write-Mp3Report -Path $finalPath -Success $mergeSucceeded -FailureMessage $mergeError -FfprobePath $ffprobePath
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
             }
