@@ -237,9 +237,9 @@ function Select-InputFile {
         $candidates = Get-WorkspaceFileCandidates -WorkspaceFolder $workspaceFolder
         Write-Info ("Working directory: {0}" -f $workspaceFolder)
         if ($candidates.Count -gt 0) {
-            Write-Info 'Files available in working directory:'
+            Write-Info 'Files available in working directory (numbered selections):'
             for ($i = 0; $i -lt $candidates.Count; $i++) {
-                Write-Host ("  {0}) {1}" -f ($i + 1), $candidates[$i].Name)
+                Write-Host ("  {0}) {1} ({2})" -f ($i + 1), $candidates[$i].Name, $candidates[$i].FullName)
             }
         } else {
             Write-Warn 'No supported files found in the working directory.'
@@ -994,7 +994,7 @@ function Merge-Mp3Files {
 
     $listPath = Join-Path $outputFolder ('ffmpeg-list-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $content = $validFiles | ForEach-Object { "file '$($_.Replace("'", "''"))'" }
-    Set-Content -Path $listPath -Value $content -Encoding UTF8
+    [System.IO.File]::WriteAllLines($listPath, $content, (New-Object System.Text.UTF8Encoding($false)))
     Write-ConcatListPreview -ListPath $listPath
 
     if (Test-Path $OutputPath) {
