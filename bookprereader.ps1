@@ -34,6 +34,14 @@ function Write-Success {
     Write-Host $Message -ForegroundColor Green
 }
 
+function Write-Section {
+    param([string]$Title)
+    Write-Host ''
+    Write-Info ('=' * 60)
+    Write-Info ("{0}" -f $Title)
+    Write-Info ('=' * 60)
+}
+
 function Clear-HostSafe {
     if ($EnableClearHost) {
         Clear-Host
@@ -682,6 +690,110 @@ function Get-Mp3Duration {
     return $null
 }
 
+function Format-Seconds {
+    param([double]$Seconds)
+    if ($null -eq $Seconds) {
+        return $null
+    }
+    $timespan = [TimeSpan]::FromSeconds($Seconds)
+    return $timespan.ToString("hh\:mm\:ss")
+}
+
+function Get-Mp3StreamInfo {
+    param(
+        [string]$Path,
+        [string]$FfprobePath
+    )
+
+    if (-not $FfprobePath) {
+        return $null
+    }
+
+    try {
+        $json = & $FfprobePath -v error -select_streams a:0 -show_entries stream=codec_name,codec_long_name,sample_rate,channels,channel_layout,bit_rate,profile -of json $Path 2>$null
+        if (-not $json) {
+            return $null
+        }
+        $parsed = $json | ConvertFrom-Json
+        if ($parsed.streams -and $parsed.streams.Count -gt 0) {
+            return $parsed.streams[0]
+        }
+    } catch {
+        return $null
+    }
+
+    return $null
+}
+
+function Write-Mp3StreamReport {
+    param(
+        [string]$Path,
+        [object]$StreamInfo,
+        [double]$Duration
+    )
+
+    Write-Info ("Chunk details: {0}" -f $Path)
+    if ($null -ne $Duration) {
+        Write-Info ("  Duration: {0} ({1:N2} seconds)" -f (Format-Seconds -Seconds $Duration), $Duration)
+    }
+    if (-not $StreamInfo) {
+        Write-Warn '  Stream info: unavailable (ffprobe missing or failed).'
+        return
+    }
+
+    if ($StreamInfo.codec_name) {
+        Write-Info ("  Codec: {0}" -f $StreamInfo.codec_name)
+    }
+    if ($StreamInfo.codec_long_name) {
+        Write-Info ("  Codec details: {0}" -f $StreamInfo.codec_long_name)
+    }
+    if ($StreamInfo.profile) {
+        Write-Info ("  Profile: {0}" -f $StreamInfo.profile)
+    }
+    if ($StreamInfo.sample_rate) {
+        Write-Info ("  Sample rate: {0} Hz" -f $StreamInfo.sample_rate)
+    }
+    if ($StreamInfo.channels) {
+        Write-Info ("  Channels: {0}" -f $StreamInfo.channels)
+    }
+    if ($StreamInfo.channel_layout) {
+        Write-Info ("  Channel layout: {0}" -f $StreamInfo.channel_layout)
+    }
+    if ($StreamInfo.bit_rate) {
+        Write-Info ("  Bit rate: {0} bps" -f $StreamInfo.bit_rate)
+    }
+}
+
+function Write-ConcatListPreview {
+    param(
+        [string]$ListPath,
+        [int]$PreviewCount = 5
+    )
+
+    if (-not (Test-Path $ListPath)) {
+        return
+    }
+
+    $lines = Get-Content -Path $ListPath
+    Write-Info ("Concat list file: {0}" -f $ListPath)
+    Write-Info ("Concat list lines: {0}" -f $lines.Count)
+    if ($lines.Count -le ($PreviewCount * 2)) {
+        foreach ($line in $lines) {
+            Write-Info ("  {0}" -f $line)
+        }
+        return
+    }
+
+    Write-Info '  Preview (first lines):'
+    foreach ($line in ($lines | Select-Object -First $PreviewCount)) {
+        Write-Info ("    {0}" -f $line)
+    }
+    Write-Info '  Preview (last lines):'
+    foreach ($line in ($lines | Select-Object -Last $PreviewCount)) {
+        Write-Info ("    {0}" -f $line)
+    }
+}
+
 function Write-Mp3Report {
     param(
         [string]$Path,
@@ -766,7 +878,7 @@ function Invoke-FfmpegConcat {
         [bool]$Reencode
     )
 
-    $arguments = @('-y', '-f', 'concat', '-safe', '0', '-i', $ListPath)
+    $arguments = @('-y', '-hide_banner', '-loglevel', 'warning', '-f', 'concat', '-safe', '0', '-i', $ListPath)
     if ($Reencode) {
         $arguments += @('-c:a', 'libmp3lame', '-q:a', '2')
     } else {
@@ -774,7 +886,28 @@ function Invoke-FfmpegConcat {
     }
     $arguments += $OutputPath
 
-    return Start-Process -FilePath $FfmpegPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $commandLine = "{0} {1}" -f $FfmpegPath, ($arguments -join ' ')
+        Write-Info ("FFmpeg command: {0}" -f $commandLine)
+        $process = Start-Process -FilePath $FfmpegPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru -RedirectStandardError $stderrPath -RedirectStandardOutput $stdoutPath
+        $stdout = Get-Content -Path $stdoutPath -Raw
+        $stderr = Get-Content -Path $stderrPath -Raw
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StdOut = $stdout
+            StdErr = $stderr
+            CommandLine = $commandLine
+        }
+    } finally {
+        if (Test-Path $stderrPath) {
+            Remove-Item $stderrPath -Force
+        }
+        if (Test-Path $stdoutPath) {
+            Remove-Item $stdoutPath -Force
+        }
+    }
 }
 
 function Merge-Mp3Files {
@@ -785,16 +918,65 @@ function Merge-Mp3Files {
 
     $ffmpeg = Ensure-Ffmpeg
     Write-Info ("FFmpeg path: {0}" -f $ffmpeg)
+    $ffprobe = Get-FfprobePath -FfmpegPath $ffmpeg
+    if ($ffprobe) {
+        Write-Info ("FFprobe path: {0}" -f $ffprobe)
+    } else {
+        Write-Warn 'FFprobe not available. Stream diagnostics will be limited.'
+    }
     $outputFolder = Split-Path $OutputPath -Parent
     if ($outputFolder) {
         Ensure-WorkspaceFolder -Path $outputFolder
     }
 
+    Write-Section 'MP3 merge diagnostics'
     Write-Info 'Ordering MP3 chunks by numeric suffix...'
     $orderedFiles = $Files | Sort-Object { Get-Mp3SortKey -Path $_ }
     foreach ($file in $orderedFiles) {
         Write-Info ("  Ordered chunk: {0}" -f $file)
     }
+
+    Write-Info 'Inspecting MP3 chunks before merge (ffmpeg concat guide)...'
+    $chunkReports = @()
+    $totalDuration = 0.0
+    $totalSize = 0L
+    foreach ($file in $orderedFiles) {
+        $duration = Get-Mp3Duration -Path $file -FfprobePath $ffprobe
+        $streamInfo = Get-Mp3StreamInfo -Path $file -FfprobePath $ffprobe
+        Write-Mp3StreamReport -Path $file -StreamInfo $streamInfo -Duration $duration
+        if ($null -ne $duration) {
+            $totalDuration += $duration
+        }
+        if (Test-Path $file) {
+            $totalSize += (Get-Item $file).Length
+        }
+        $chunkReports += [pscustomobject]@{
+            Path = $file
+            Duration = $duration
+            StreamInfo = $streamInfo
+        }
+    }
+
+    $reference = $chunkReports | Where-Object { $_.StreamInfo } | Select-Object -First 1
+    if ($reference) {
+        $mismatches = $chunkReports | Where-Object {
+            $_.StreamInfo -and (
+                $_.StreamInfo.codec_name -ne $reference.StreamInfo.codec_name -or
+                $_.StreamInfo.sample_rate -ne $reference.StreamInfo.sample_rate -or
+                $_.StreamInfo.channels -ne $reference.StreamInfo.channels -or
+                $_.StreamInfo.channel_layout -ne $reference.StreamInfo.channel_layout -or
+                $_.StreamInfo.profile -ne $reference.StreamInfo.profile
+            )
+        }
+        if ($mismatches.Count -gt 0) {
+            Write-Warn 'Detected mismatched stream parameters across chunks. Stream copy concat may fail; re-encode fallback may be required.'
+        } else {
+            Write-Info 'Stream parameters appear consistent across chunks (concat demuxer friendly).'
+        }
+    }
+
+    Write-Info ("Total chunk duration: {0} ({1:N2} seconds)" -f (Format-Seconds -Seconds $totalDuration), $totalDuration)
+    Write-Info ("Total chunk size: {0} bytes ({1:N2} MB)" -f $totalSize, ($totalSize / 1MB))
 
     Write-Info 'Validating MP3 chunks before merge...'
     $validFiles = New-Object System.Collections.Generic.List[string]
@@ -813,6 +995,7 @@ function Merge-Mp3Files {
     $listPath = Join-Path $outputFolder ('ffmpeg-list-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $content = $validFiles | ForEach-Object { "file '$($_.Replace("'", "''"))'" }
     Set-Content -Path $listPath -Value $content -Encoding UTF8
+    Write-ConcatListPreview -ListPath $listPath
 
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
@@ -822,12 +1005,24 @@ function Merge-Mp3Files {
         Write-Info ("Merging {0} chunks into {1}" -f $validFiles.Count, $OutputPath)
         $process = Invoke-FfmpegConcat -FfmpegPath $ffmpeg -ListPath $listPath -OutputPath $OutputPath -Reencode $false
         if ($process.ExitCode -ne 0) {
+            if ($process.StdErr) {
+                Write-Warn ("FFmpeg stderr (stream copy):`n{0}" -f $process.StdErr.Trim())
+            }
+            if ($process.StdOut) {
+                Write-Info ("FFmpeg stdout (stream copy):`n{0}" -f $process.StdOut.Trim())
+            }
             Write-Warn ("FFmpeg stream copy merge failed (exit {0}). Retrying with re-encode..." -f $process.ExitCode)
             if (Test-Path $OutputPath) {
                 Remove-Item $OutputPath -Force
             }
             $process = Invoke-FfmpegConcat -FfmpegPath $ffmpeg -ListPath $listPath -OutputPath $OutputPath -Reencode $true
             if ($process.ExitCode -ne 0) {
+                if ($process.StdErr) {
+                    Write-Warn ("FFmpeg stderr (re-encode):`n{0}" -f $process.StdErr.Trim())
+                }
+                if ($process.StdOut) {
+                    Write-Info ("FFmpeg stdout (re-encode):`n{0}" -f $process.StdOut.Trim())
+                }
                 throw ("FFmpeg merge failed with exit code {0}." -f $process.ExitCode)
             }
         }
@@ -963,7 +1158,8 @@ function Invoke-OpenAISceneTitle {
     param(
         [string]$Text,
         [string]$ApiKey,
-        [string]$Type
+        [string]$Type,
+        [string[]]$ExistingTitles
     )
 
     if ([string]::IsNullOrWhiteSpace($Text)) {
@@ -976,7 +1172,14 @@ function Invoke-OpenAISceneTitle {
         "Content-Type"  = "application/json"
     }
     $safeText = Normalize-TextForJson -Text $Text
+    $priorTitles = $null
+    if ($ExistingTitles -and $ExistingTitles.Count -gt 0) {
+        $priorTitles = ($ExistingTitles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 50)
+    }
     $prompt = "Create a short, punchy $Type title (3-8 words) based on the content. Respond with the title only."
+    if ($priorTitles) {
+        $prompt += "`nAvoid repeating or sounding too similar to these existing titles:`n- " + ($priorTitles -join "`n- ")
+    }
     $bodyObject = @{
         model = 'gpt-4o-mini'
         messages = @(
@@ -1024,6 +1227,7 @@ function Split-BookIntoScenes {
     $chunks = New-Object System.Collections.Generic.List[object]
     $currentLines = New-Object System.Collections.Generic.List[string]
     $currentInfo = $null
+    $knownTitles = New-Object System.Collections.Generic.List[string]
 
     foreach ($line in $lines) {
         $separatorInfo = Get-SceneSeparatorInfo -Line $line
@@ -1053,6 +1257,10 @@ function Split-BookIntoScenes {
         throw 'No content detected to split.'
     }
 
+    Write-Section 'Scene split diagnostics'
+    Write-Info ("Total chunks detected: {0}" -f $chunks.Count)
+    Write-Info ("Output folder: {0}" -f $outputFolder)
+
     $apiKey = $null
     try {
         $apiKey = Get-ApiKey -Settings $Settings
@@ -1069,7 +1277,8 @@ function Split-BookIntoScenes {
             $title = Convert-ToTitleCase -Text $info.Title
         } else {
             if ($apiKey) {
-                $generated = Invoke-OpenAISceneTitle -Text $chunk.Content -ApiKey $apiKey -Type $type
+                Write-Info ("Generating {0} title (known titles: {1})..." -f $type, $knownTitles.Count)
+                $generated = Invoke-OpenAISceneTitle -Text $chunk.Content -ApiKey $apiKey -Type $type -ExistingTitles $knownTitles
                 if ($generated) {
                     $title = Convert-ToTitleCase -Text $generated
                 }
@@ -1082,6 +1291,11 @@ function Split-BookIntoScenes {
 
         Set-Content -Path $outputPath -Value $chunk.Content -Encoding UTF8
         Write-Success ("Saved: {0}" -f $outputPath)
+        if ($title) {
+            $knownTitles.Add($title)
+        } else {
+            $knownTitles.Add($displayName)
+        }
         $index++
     }
 
@@ -1118,7 +1332,6 @@ function Invoke-TtsForText {
     Write-Success ("Prepared {0} chunks for TTS." -f $chunks.Count)
     $apiKey = Get-ApiKey -Settings $Settings
     Write-Info 'API key detected for TTS requests.'
-    Write-Warn $apiKey
 
     $outputFiles = New-Object System.Collections.Generic.List[string]
     $ffmpegPath = $null
