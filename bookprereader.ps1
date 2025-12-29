@@ -303,7 +303,7 @@ function Split-TextIntoChunks {
     )
 
     $chunks = New-Object System.Collections.Generic.List[string]
-    $paragraphs = $Text -split "(\r?\n){2,}"
+    $paragraphs = $Text -split "(?:\r?\n){2,}"
     $current = ''
 
     foreach ($paragraph in $paragraphs) {
@@ -311,17 +311,22 @@ function Split-TextIntoChunks {
         if (-not $clean) {
             continue
         }
+        if ($current -and (($current.Length + $clean.Length + 2) -gt $Limit)) {
+            $chunks.Add($current.Trim())
+            $current = ''
+        }
+
         if ($clean.Length -gt $Limit) {
+            Write-Warn ("Paragraph exceeds limit ({0} chars). Splitting by sentences." -f $clean.Length)
             $sentences = $clean -split '(?<=[.!?])\s+'
+            $buffer = ''
             foreach ($sentence in $sentences) {
                 if ([string]::IsNullOrWhiteSpace($sentence)) {
                     continue
                 }
-                if (($current.Length + $sentence.Length + 2) -gt $Limit) {
-                    if ($current) {
-                        $chunks.Add($current.Trim())
-                        $current = ''
-                    }
+                if ($buffer -and (($buffer.Length + $sentence.Length + 1) -gt $Limit)) {
+                    $chunks.Add($buffer.Trim())
+                    $buffer = ''
                 }
                 if ($sentence.Length -gt $Limit) {
                     $offset = 0
@@ -331,25 +336,23 @@ function Split-TextIntoChunks {
                         $offset += $sliceLength
                     }
                 } else {
-                    if ($current) {
-                        $current += "`n`n$sentence"
+                    if ($buffer) {
+                        $buffer += " $sentence"
                     } else {
-                        $current = $sentence
+                        $buffer = $sentence
                     }
                 }
+            }
+            if ($buffer) {
+                $chunks.Add($buffer.Trim())
             }
             continue
         }
 
-        if (($current.Length + $clean.Length + 2) -gt $Limit) {
-            $chunks.Add($current.Trim())
-            $current = $clean
+        if ($current) {
+            $current += "`n`n$clean"
         } else {
-            if ($current) {
-                $current += "`n`n$clean"
-            } else {
-                $current = $clean
-            }
+            $current = $clean
         }
     }
 
@@ -402,7 +405,7 @@ function Invoke-OpenAITts {
         Remove-Item $OutputPath -Force
     }
 
-    while ($true) {
+    for ($attempt = 0; $attempt -le 2; $attempt++) {
         try {
             Write-Info 'OpenAI TTS request details (full):'
             Write-Info ("  URL: {0}" -f $uri)
@@ -465,12 +468,14 @@ function Invoke-OpenAITts {
             foreach ($line in $errorDetails) {
                 Write-ErrorMessage $line
             }
-            while ($true) {
-                $choice = (Read-Host 'Enter 1').Trim()
-                if ($choice -eq '1') {
-                    throw 'OpenAI TTS request aborted by user.'
+            if ($attempt -lt 2) {
+                Write-Warn 'OpenAI TTS request failed. Waiting 30 seconds before retry...'
+                Start-Sleep -Seconds 30
+                if (Test-Path $OutputPath) {
+                    Remove-Item $OutputPath -Force
                 }
-                Write-Warn 'Invalid selection. Enter 1.'
+            } else {
+                throw 'OpenAI TTS request failed after 2 retries.'
             }
         }
     }
@@ -759,6 +764,181 @@ function Get-UnRedactedHeadersForLog {
     return $copy
 }
 
+function Convert-ToTitleCase {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $Text
+    }
+    $culture = [System.Globalization.CultureInfo]::CurrentCulture
+    return $culture.TextInfo.ToTitleCase($Text.ToLowerInvariant())
+}
+
+function Get-SceneSeparatorInfo {
+    param([string]$Line)
+
+    if ($null -eq $Line) {
+        return $null
+    }
+
+    $trimmed = $Line.Trim()
+    if ($trimmed -match '^(Scene|Chapter)$') {
+        return @{
+            Type = $Matches[1]
+            Title = $null
+            RawLine = $trimmed
+        }
+    }
+
+    if ($trimmed -match '^(Scene|Chapter)\s*-\s*(.+)$') {
+        return @{
+            Type = $Matches[1]
+            Title = $Matches[2].Trim()
+            RawLine = $trimmed
+        }
+    }
+
+    return $null
+}
+
+function Sanitize-FileName {
+    param([string]$Name)
+
+    if ($null -eq $Name) {
+        return $Name
+    }
+    $sanitized = $Name -replace '[<>:"/\\|?*]', ''
+    $sanitized = $sanitized -replace '\s+', ' '
+    return $sanitized.Trim()
+}
+
+function Invoke-OpenAISceneTitle {
+    param(
+        [string]$Text,
+        [string]$ApiKey,
+        [string]$Type
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $uri = 'https://api.openai.com/v1/chat/completions'
+    $headers = @{
+        "Authorization" = "Bearer $ApiKey"
+        "Content-Type"  = "application/json"
+    }
+    $safeText = Normalize-TextForJson -Text $Text
+    $prompt = "Create a short, punchy $Type title (3-8 words) based on the content. Respond with the title only."
+    $bodyObject = @{
+        model = 'gpt-4o-mini'
+        messages = @(
+            @{ role = 'system'; content = 'You create concise scene and chapter titles.' },
+            @{ role = 'user'; content = "$prompt`n`nContent:`n$safeText" }
+        )
+        temperature = 0.6
+        max_tokens = 20
+    }
+    $body = $bodyObject | ConvertTo-Json -Depth 6
+
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -ErrorAction Stop
+        $title = $response.choices[0].message.content
+        if ($title) {
+            return $title.Trim().Trim('"')
+        }
+    } catch {
+        Write-Warn ("Title generation failed: {0}" -f $_.Exception.Message)
+        return $null
+    }
+
+    return $null
+}
+
+function Split-BookIntoScenes {
+    param(
+        [string]$FilePath,
+        [object]$Settings
+    )
+
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $outputFolder = Join-Path $Settings.WorkspaceFolder ("{0}-split" -f $baseName)
+    Ensure-WorkspaceFolder -Path $outputFolder
+
+    Write-Info ("Reading input file: {0}" -f $FilePath)
+    $text = Get-TextFromFile -Path $FilePath
+    if (-not $text) {
+        throw 'No text found in the file.'
+    }
+
+    $lines = $text -split '\r?\n'
+    $chunks = New-Object System.Collections.Generic.List[object]
+    $currentLines = New-Object System.Collections.Generic.List[string]
+    $currentInfo = $null
+
+    foreach ($line in $lines) {
+        $separatorInfo = Get-SceneSeparatorInfo -Line $line
+        if ($separatorInfo) {
+            if ($currentLines.Count -gt 0) {
+                $chunks.Add([pscustomobject]@{
+                        Info = $currentInfo
+                        Content = ($currentLines -join "`n")
+                    })
+                $currentLines.Clear()
+            }
+            $currentInfo = $separatorInfo
+            $currentLines.Add($line)
+            continue
+        }
+        $currentLines.Add($line)
+    }
+
+    if ($currentLines.Count -gt 0) {
+        $chunks.Add([pscustomobject]@{
+                Info = $currentInfo
+                Content = ($currentLines -join "`n")
+            })
+    }
+
+    if ($chunks.Count -eq 0) {
+        throw 'No content detected to split.'
+    }
+
+    $apiKey = $null
+    try {
+        $apiKey = Get-ApiKey -Settings $Settings
+    } catch {
+        $apiKey = $null
+    }
+
+    $index = 1
+    foreach ($chunk in $chunks) {
+        $info = $chunk.Info
+        $type = if ($info -and $info.Type) { $info.Type } else { 'Scene' }
+        $title = $null
+        if ($info -and $info.Title) {
+            $title = Convert-ToTitleCase -Text $info.Title
+        } else {
+            if ($apiKey) {
+                $generated = Invoke-OpenAISceneTitle -Text $chunk.Content -ApiKey $apiKey -Type $type
+                if ($generated) {
+                    $title = Convert-ToTitleCase -Text $generated
+                }
+            }
+        }
+
+        $displayName = if ($title) { "$type - $title" } else { $type }
+        $fileName = Sanitize-FileName -Name ("{0} - {1}.txt" -f $index, $displayName)
+        $outputPath = Join-Path $outputFolder $fileName
+
+        Set-Content -Path $outputPath -Value $chunk.Content -Encoding UTF8
+        Write-Success ("Saved: {0}" -f $outputPath)
+        $index++
+    }
+
+    Write-Success ("Split complete. Output folder: {0}" -f $outputFolder)
+}
+
 function Invoke-TtsForText {
     param(
         [string]$ChapterName,
@@ -838,6 +1018,7 @@ while ($true) {
     Clear-HostSafe
     Write-Info 'Main Menu'
     Write-Host '1) Create audio'
+    Write-Host '2) Split book into chapters/scenes'
     Write-Host '9) Settings'
     Write-Host '0) Exit'
     $selection = (Read-Host 'Choose an option').Trim()
@@ -884,6 +1065,15 @@ while ($true) {
                     $inputText = Read-PastedText
                     Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
                 }
+            } catch {
+                Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
+            }
+            Read-Host 'Press Enter to return to the main menu'
+        }
+        '2' {
+            try {
+                $filePath = Select-InputFile
+                Split-BookIntoScenes -FilePath $filePath -Settings $settings
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
             }
