@@ -78,11 +78,7 @@ function Ensure-WorkspaceFolder {
 
 function Get-ApiKey {
     param([object]$Settings)
-    #$candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
-    #$candidate =  $Settings.ApiKey 
-    $candidate = $DefaultApiKey
-    Write-Info "Settings ApiKey"
-    Write-Info $candidate
+    $candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
     if ($candidate) {
         $candidate = $candidate.Trim()
     }
@@ -90,7 +86,6 @@ function Get-ApiKey {
         throw 'OpenAI API key is missing. Set OPENAI_API_KEY or update it in Settings.'
     }
     return $candidate
-    #return DefaultApiKey
 }
 
 function Select-Voice {
@@ -365,6 +360,22 @@ function Split-TextIntoChunks {
     return $chunks
 }
 
+function Normalize-TextForJson {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    $normalized = $Text
+    $normalized = $normalized.Replace([char]0x201C, '"')
+    $normalized = $normalized.Replace([char]0x201D, '"')
+    $normalized = $normalized.Replace([char]0x2018, "'")
+    $normalized = $normalized.Replace([char]0x2019, "'")
+
+    return $normalized
+}
+
 function Invoke-OpenAITts {
     param(
         [string]$Text,
@@ -375,20 +386,15 @@ function Invoke-OpenAITts {
     )
 
     $uri = 'https://api.openai.com/v1/audio/speech'
-    #$headers = @{ Authorization = "Bearer $ApiKey" }
-    
-    Write-Info $ApiKey
     $headers = @{
-                    "Authorization" = "Bearer $ApiKey"
-                    "Content-Type"  = "application/json"
-                }
-    $headersJson = $headers | ConvertTo-Json -Depth 4
+        "Authorization" = "Bearer $ApiKey"
+        "Content-Type"  = "application/json"
+    }
+    $safeText = Normalize-TextForJson -Text $Text
     $bodyObject = @{
-        #model = $Model
-        model = "tts-1"
-        input = $Text
+        model = $Model
+        input = $safeText
         voice = $Voice
-        #format = "mp3"
     }
     $body = $bodyObject | ConvertTo-Json -Depth 4
 
@@ -396,42 +402,24 @@ function Invoke-OpenAITts {
         Remove-Item $OutputPath -Force
     }
 
-    if (Test-Path $OutputPath) {
-                    Remove-Item $OutputPath -Force
-                }
-
     while ($true) {
         try {
-            
+            Write-Info 'OpenAI TTS request details (full):'
+            Write-Info ("  URL: {0}" -f $uri)
+            Write-Info ("  Headers (raw): {0}" -f ($headers | ConvertTo-Json -Depth 6))
+            Write-Info ("  Headers (redacted): {0}" -f ((Get-RedactedHeadersForLog -Headers $headers) | ConvertTo-Json -Depth 6))
+            Write-Info ("  Body: {0}" -f $body)
+            Write-Info ("  Output path: {0}" -f $OutputPath)
 
-            $uri = "https://api.openai.com/v1/audio/speech"
-            $headers = @{
-                "Authorization" = "Bearer $DefaultApiKey"
-                "Content-Type"  = "application/json"
+            $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -PassThru -ErrorAction Stop
+            Write-Info 'OpenAI TTS response details (success):'
+            Write-Info ("  Status: {0} {1}" -f $response.StatusCode, $response.StatusDescription)
+            Write-Info ("  Headers: {0}" -f ($response.Headers | ConvertTo-Json -Depth 6))
+            if ($response.Headers['x-request-id']) {
+                Write-Info ("  OpenAI request id: {0}" -f $response.Headers['x-request-id'])
             }
 
-            # 3. Create the request body as a JSON string
-            $body = @{
-                model = "tts-1"
-                input = $Text
-                voice = "alloy"
-            } | ConvertTo-Json
-
-            # 4. Make the request and save the output directly to a file
-            #Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -OutFile "output.mp3"  -ErrorAction Stop
-
-
-            Write-Warn $uri
-            Write-Info $ApiKey
-            Write-Info $headers 
-            write-Info $headersJson.ToString()
-            Write-Info $body.ToString()
-            Write-Info $OutputPath.ToString()
-            #Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
-            # Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -OutFile "output.mp3"
-            Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -OutFile "output.mp3"  -ErrorAction Stop
-            
-            #return
+            return
         } catch {
             Write-Error $_.Exception.ToString()
             Write-Error $_.ToString()
@@ -440,9 +428,10 @@ function Invoke-OpenAITts {
             $errorDetails.Add(("Request URL: {0}" -f $uri))
             $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
             $unredactedHeaders = Get-UnRedactedHeadersForLog -Headers $headers
-            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4) ))
-            $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
+            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 6)))
+            $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 6)))
             $errorDetails.Add(("Request body: {0}" -f $body))
+            $errorDetails.Add(("Request output path: {0}" -f $OutputPath))
 
             
             $response = $_.Exception.Response
@@ -473,8 +462,9 @@ function Invoke-OpenAITts {
             }
             $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
             $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
-            Write-Error $errorDetails.ToString()
-            Write-Error $errorDetails.Count
+            foreach ($line in $errorDetails) {
+                Write-ErrorMessage $line
+            }
             while ($true) {
                 $choice = (Read-Host 'Enter 1').Trim()
                 if ($choice -eq '1') {
