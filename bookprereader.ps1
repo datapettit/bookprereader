@@ -5,7 +5,7 @@ $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 4096
 $SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
 $SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
-$DefaultApiKey = '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'
+$DefaultApiKey = ''
 $EnableClearHost = $false
 $IsWindows = $false
 if ($env:OS -eq 'Windows_NT') {
@@ -87,6 +87,7 @@ function Get-ApiKey {
                 $candidate = $candidate.Substring(1, $candidate.Length - 2)
             }
         }
+        $candidate = $candidate -replace '[\r\n]+', ''
     }
     if ([string]::IsNullOrWhiteSpace($candidate)) {
         throw 'OpenAI API key is missing. Set OPENAI_API_KEY or update it in Settings.'
@@ -398,7 +399,8 @@ function Invoke-OpenAITts {
         $errorDetails = New-Object System.Collections.Generic.List[string]
         $errorDetails.Add('OpenAI TTS request failed.')
         $errorDetails.Add(("Request URL: {0}" -f $uri))
-        $errorDetails.Add(("Request headers: {0}" -f ($headers | ConvertTo-Json -Depth 4)))
+        $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
+        $errorDetails.Add(("Request headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
         $errorDetails.Add(("Request body: {0}" -f $body))
         $response = $_.Exception.Response
         if ($response) {
@@ -675,7 +677,27 @@ function Get-ApiKeyPreview {
     if ([string]::IsNullOrWhiteSpace($ApiKey)) {
         return '(not set)'
     }
-    return $ApiKey
+    $trimmed = $ApiKey.Trim()
+    if ($trimmed.Length -le 8) {
+        return ('*' * $trimmed.Length)
+    }
+    $prefix = $trimmed.Substring(0, 4)
+    $suffix = $trimmed.Substring($trimmed.Length - 4, 4)
+    return ("{0}...{1}" -f $prefix, $suffix)
+}
+
+function Get-RedactedHeadersForLog {
+    param([hashtable]$Headers)
+
+    $copy = @{}
+    foreach ($key in $Headers.Keys) {
+        if ($key -eq 'Authorization') {
+            $copy[$key] = 'Bearer [REDACTED]'
+        } else {
+            $copy[$key] = $Headers[$key]
+        }
+    }
+    return $copy
 }
 
 function Invoke-TtsForText {
