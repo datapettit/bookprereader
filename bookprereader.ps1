@@ -994,7 +994,7 @@ function Merge-Mp3Files {
 
     $listPath = Join-Path $outputFolder ('ffmpeg-list-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $content = $validFiles | ForEach-Object { "file '$($_.Replace("'", "''"))'" }
-    Set-Content -Path $listPath -Value $content -Encoding UTF8
+    [System.IO.File]::WriteAllLines($listPath, $content, (New-Object System.Text.UTF8Encoding($false)))
     Write-ConcatListPreview -ListPath $listPath
 
     if (Test-Path $OutputPath) {
