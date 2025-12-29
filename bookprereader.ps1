@@ -504,6 +504,18 @@ function Normalize-TextForJson {
     return $normalized
 }
 
+function Convert-ToJsonSafeText {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    $normalized = Normalize-TextForJson -Text $Text
+    $normalized = $normalized -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+    return $normalized
+}
+
 function Invoke-OpenAITts {
     param(
         [string]$Text,
@@ -518,7 +530,7 @@ function Invoke-OpenAITts {
         "Authorization" = "Bearer $ApiKey"
         "Content-Type"  = "application/json"
     }
-    $safeText = Normalize-TextForJson -Text $Text
+    $safeText = Convert-ToJsonSafeText -Text $Text
     $bodyObject = @{
         model = $Model
         input = $safeText
@@ -561,7 +573,15 @@ function Invoke-OpenAITts {
             $errorDetails.Add(("Request body: {0}" -f $body))
             $errorDetails.Add(("Request output path: {0}" -f $OutputPath))
 
-            
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $errorDetails.Add(("Error details message: {0}" -f $_.ErrorDetails.Message))
+            }
+
+            $debugRoot = (Get-Location).Path
+            $debugRequestPath = Join-Path $debugRoot 'debug_request.txt'
+            $debugResponsePath = Join-Path $debugRoot 'debug_response.txt'
+
+            $details = $null
             $response = $_.Exception.Response
             if ($response) {
                 $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
@@ -588,10 +608,38 @@ function Invoke-OpenAITts {
             } else {
                 $errorDetails.Add('Response: (none)')
             }
+            $errorDetails.Add(("Request headers (full): {0}" -f ($headers | ConvertTo-Json -Depth 6)))
             $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
             $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
             foreach ($line in $errorDetails) {
                 Write-ErrorMessage $line
+            }
+            try {
+                $requestDump = @(
+                    'OpenAI TTS request debug dump'
+                    ("URL: {0}" -f $uri)
+                    ("Headers: {0}" -f ($headers | ConvertTo-Json -Depth 6))
+                    ("Body: {0}" -f $body)
+                    ("Output path: {0}" -f $OutputPath)
+                )
+                Set-Content -Path $debugRequestPath -Value $requestDump -Encoding UTF8
+            } catch {
+                Write-Warn ("Failed to write debug request payload to {0}: {1}" -f $debugRequestPath, $_.Exception.Message)
+            }
+            try {
+                $responseDump = @('OpenAI TTS response debug dump')
+                if ($response) {
+                    $responseDump += ("Response: {0}" -f ($response | Out-String))
+                    $responseDump += ("Response headers (raw): {0}" -f ($response.Headers | Out-String))
+                } else {
+                    $responseDump += 'Response: (none)'
+                }
+                if ($details) {
+                    $responseDump += ("Response body: {0}" -f $details)
+                }
+                Set-Content -Path $debugResponsePath -Value $responseDump -Encoding UTF8
+            } catch {
+                Write-Warn ("Failed to write debug response details to {0}: {1}" -f $debugResponsePath, $_.Exception.Message)
             }
             if ($attempt -lt 2) {
                 Write-Warn 'OpenAI TTS request failed. Waiting 30 seconds before retry...'
@@ -1286,7 +1334,8 @@ function Split-BookIntoScenes {
         }
 
         $displayName = if ($title) { "$type - $title" } else { $type }
-        $fileName = Sanitize-FileName -Name ("{0} - {1}.txt" -f $index, $displayName)
+        $sceneIndex = $index.ToString('D3')
+        $fileName = Sanitize-FileName -Name ("{0} - {1}.txt" -f $sceneIndex, $displayName)
         $outputPath = Join-Path $outputFolder $fileName
 
         Set-Content -Path $outputPath -Value $chunk.Content -Encoding UTF8
@@ -1417,6 +1466,10 @@ while ($true) {
                         Write-Warn 'No supported files found in the selected folder.'
                         break
                     }
+                    $completedFolder = Join-Path $folderPath 'Completed Chapters'
+                    $issueFolder = Join-Path $folderPath 'Issue Chapters'
+                    Ensure-WorkspaceFolder -Path $completedFolder
+                    Ensure-WorkspaceFolder -Path $issueFolder
                     foreach ($file in $files) {
                         $chapterName = Get-ChapterNameFromFile -FilePath $file.FullName
                         if (-not $chapterName) {
@@ -1425,7 +1478,22 @@ while ($true) {
                         }
                         Write-Info ("Reading input file: {0}" -f $file.FullName)
                         $inputText = Get-TextFromFile -Path $file.FullName
-                        Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
+                        $processingSucceeded = $false
+                        try {
+                            Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
+                            $finalPath = Join-Path $settings.WorkspaceFolder ("{0}.mp3" -f $chapterName)
+                            $processingSucceeded = Test-Path $finalPath
+                        } catch {
+                            $processingSucceeded = $false
+                            Write-Warn ("TTS failed for {0}: {1}" -f $file.FullName, $_.Exception.Message)
+                        }
+                        $destinationFolder = if ($processingSucceeded) { $completedFolder } else { $issueFolder }
+                        try {
+                            Move-Item -Path $file.FullName -Destination $destinationFolder -Force
+                            Write-Info ("Moved source file to: {0}" -f $destinationFolder)
+                        } catch {
+                            Write-Warn ("Failed to move file to {0}: {1}" -f $destinationFolder, $_.Exception.Message)
+                        }
                     }
                 } else {
                     Write-Info 'Input method selected: paste text'
