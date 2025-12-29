@@ -79,7 +79,8 @@ function Ensure-WorkspaceFolder {
 function Get-ApiKey {
     param([object]$Settings)
     #$candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
-    $candidate =  $Settings.ApiKey 
+    #$candidate =  $Settings.ApiKey 
+    $candidate = $DefaultApiKey
     Write-Info "Settings ApiKey"
     Write-Info $candidate
     if ($candidate) {
@@ -89,6 +90,7 @@ function Get-ApiKey {
         throw 'OpenAI API key is missing. Set OPENAI_API_KEY or update it in Settings.'
     }
     return $candidate
+    #return DefaultApiKey
 }
 
 function Select-Voice {
@@ -373,66 +375,76 @@ function Invoke-OpenAITts {
     )
 
     $uri = 'https://api.openai.com/v1/audio/speech'
+    #$headers = @{ Authorization = "Bearer $ApiKey" }
+    
+    Write-Info $ApiKey
     $headers = @{
-        Authorization = "Bearer $ApiKey"
-        'Content-Type' = 'application/json'
-    }
+                    "Authorization" = "Bearer $ApiKey"
+                    "Content-Type"  = "application/json"
+                }
+    $headersJson = $headers | ConvertTo-Json -Depth 4
     $bodyObject = @{
-        model = $Model
+        #model = $Model
+        model = "tts-1"
         input = $Text
         voice = $Voice
-        response_format = 'mp3'
+        #format = "mp3"
     }
     $body = $bodyObject | ConvertTo-Json -Depth 4
-    $contentType = 'application/json'
-    $requestHeadersRaw = $headers | ConvertTo-Json -Depth 4
-    $requestDump = @(
-        '--- OpenAI TTS Request ---'
-        ("URI: {0}" -f $uri)
-        ("Headers: {0}" -f $requestHeadersRaw)
-        ("Body: {0}" -f $body)
-        ("Content-Type: {0}" -f $contentType)
-        '--------------------------'
-    ) -join [Environment]::NewLine
 
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
     }
 
-
+    if (Test-Path $OutputPath) {
+                    Remove-Item $OutputPath -Force
+                }
 
     while ($true) {
         try {
-            Write-Warn $requestDump
-            $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType $contentType -OutFile $OutputPath -PassThru -ErrorAction Stop
-            $responseHeadersRaw = $response.Headers | ConvertTo-Json -Depth 6
-            $responseBodyRaw = ''
-            if (Test-Path $OutputPath) {
-                $responseBytes = [System.IO.File]::ReadAllBytes($OutputPath)
-                $responseBodyRaw = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($responseBytes)
+            
+
+            $uri = "https://api.openai.com/v1/audio/speech"
+            $headers = @{
+                "Authorization" = "Bearer $DefaultApiKey"
+                "Content-Type"  = "application/json"
             }
-            $responseDump = @(
-                '--- OpenAI TTS Response ---'
-                ("Status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription)
-                ("Headers: {0}" -f $responseHeadersRaw)
-                ("Body (raw): {0}" -f $responseBodyRaw)
-                '---------------------------'
-            ) -join [Environment]::NewLine
-            Write-Info $responseDump
-            return
+
+            # 3. Create the request body as a JSON string
+            $body = @{
+                model = "tts-1"
+                input = $Text
+                voice = "alloy"
+            } | ConvertTo-Json
+
+            # 4. Make the request and save the output directly to a file
+            #Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -OutFile "output.mp3"  -ErrorAction Stop
+
+
+            Write-Warn $uri
+            Write-Info $ApiKey
+            Write-Info $headers 
+            write-Info $headersJson.ToString()
+            Write-Info $body.ToString()
+            Write-Info $OutputPath.ToString()
+            #Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
+            # Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -OutFile "output.mp3"
+            Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -OutFile "output.mp3"  -ErrorAction Stop
+            
+            #return
         } catch {
-            if (Test-Path $OutputPath) {
-                Remove-Item $OutputPath -Force
-            }
+            Write-Error $_.Exception.ToString()
+            Write-Error $_.ToString()
             $errorDetails = New-Object System.Collections.Generic.List[string]
             $errorDetails.Add('OpenAI TTS request failed.')
             $errorDetails.Add(("Request URL: {0}" -f $uri))
             $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
             $unredactedHeaders = Get-UnRedactedHeadersForLog -Headers $headers
-            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4)))
+            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4) ))
             $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
             $errorDetails.Add(("Request body: {0}" -f $body))
-            $errorDetails.Add(("Request content-type: {0}" -f $contentType))
+
+            
             $response = $_.Exception.Response
             if ($response) {
                 $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
@@ -461,7 +473,8 @@ function Invoke-OpenAITts {
             }
             $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
             $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
-          
+            Write-Error $errorDetails.ToString()
+            Write-Error $errorDetails.Count
             while ($true) {
                 $choice = (Read-Host 'Enter 1').Trim()
                 if ($choice -eq '1') {
