@@ -392,45 +392,89 @@ function Invoke-OpenAITts {
 
 
 
-    try {
-        Write-Info $uri
-        Write-Info $headers.ToString()
-        Write-Info $body.ToString()
-        Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
-    } catch {
-        if (Test-Path $OutputPath) {
-            Remove-Item $OutputPath -Force
-        }
-        $errorDetails = New-Object System.Collections.Generic.List[string]
-        $errorDetails.Add('OpenAI TTS request failed.')
-        $errorDetails.Add(("Request URL: {0}" -f $uri))
-        $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
-        $unredactedHeaders = Get-UnRedactedHeadersForLog -Headers $headers
-        $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4) ))
-        $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
-        $errorDetails.Add(("Request body: {0}" -f $body))
-        $response = $_.Exception.Response
-        if ($response) {
-            $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
-            $errorDetails.Add(("Response headers: {0}" -f ($response.Headers | ConvertTo-Json -Depth 4)))
-            if ($response.Headers['x-request-id']) {
-                $errorDetails.Add(("OpenAI request id: {0}" -f $response.Headers['x-request-id']))
+    while ($true) {
+        try {
+            Write-Info $uri
+            Write-Info $headers.ToString()
+            Write-Info $body.ToString()
+            Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
+            return
+        } catch {
+            if (Test-Path $OutputPath) {
+                Remove-Item $OutputPath -Force
             }
-            if ($response.GetResponseStream()) {
-                $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-                try {
-                    $details = $reader.ReadToEnd()
-                    if ($details) {
-                        $errorDetails.Add(("Response body: {0}" -f $details))
-                    }
-                } finally {
-                    $reader.Close()
+            $errorDetails = New-Object System.Collections.Generic.List[string]
+            $errorDetails.Add('OpenAI TTS request failed.')
+            $errorDetails.Add(("Request URL: {0}" -f $uri))
+            $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
+            $unredactedHeaders = Get-UnRedactedHeadersForLog -Headers $headers
+            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4) ))
+            $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
+            $errorDetails.Add(("Request body: {0}" -f $body))
+            $response = $_.Exception.Response
+            if ($response) {
+                $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
+                $errorDetails.Add(("Response headers (raw): {0}" -f $response.Headers.ToString()))
+                $errorDetails.Add(("Response headers (json): {0}" -f ($response.Headers | ConvertTo-Json -Depth 6)))
+                if ($response.Headers['x-request-id']) {
+                    $errorDetails.Add(("OpenAI request id: {0}" -f $response.Headers['x-request-id']))
                 }
+                if ($response.GetResponseStream()) {
+                    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+                    try {
+                        $details = $reader.ReadToEnd()
+                        if ($details) {
+                            $errorDetails.Add(("Response body: {0}" -f $details))
+                        } else {
+                            $errorDetails.Add('Response body: (empty)')
+                        }
+                    } finally {
+                        $reader.Close()
+                    }
+                } else {
+                    $errorDetails.Add('Response body: (no response stream)')
+                }
+            } else {
+                $errorDetails.Add('Response: (none)')
+            }
+            $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
+            $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
+            Write-ErrorMessage ($errorDetails -join [Environment]::NewLine)
+
+            Write-Warn 'TTS request failed. Choose an option:'
+            Write-Host '  1) Retry'
+            Write-Host '  2) Exit'
+            Write-Host 'Debug helper: paste this in Chrome DevTools console to retry:'
+            $jsBody = ($body -replace '\\', '\\\\' -replace "'", "\\'")
+            $jsBody = ($jsBody -replace "`r", '' -replace "`n", '\n')
+            $jsSnippet = @"
+fetch('$uri', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY',
+    'Content-Type': 'application/json'
+  },
+  body: '$jsBody'
+}).then(async (res) => {
+  const text = await res.text();
+  console.log('Status:', res.status, res.statusText);
+  console.log('Headers:', Object.fromEntries(res.headers.entries()));
+  console.log('Body:', text);
+}).catch(err => console.error(err));
+"@
+            Write-Host $jsSnippet
+            while ($true) {
+                $choice = (Read-Host 'Enter 1 to retry or 2 to exit').Trim()
+                if ($choice -eq '1') {
+                    Read-Host 'Paste your debug results and press Enter when ready to retry'
+                    break
+                }
+                if ($choice -eq '2') {
+                    throw 'OpenAI TTS request aborted by user.'
+                }
+                Write-Warn 'Invalid selection. Enter 1 or 2.'
             }
         }
-        $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
-        $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
-        throw ($errorDetails -join [Environment]::NewLine)
     }
 }
 
