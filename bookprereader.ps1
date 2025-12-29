@@ -76,6 +76,19 @@ function Ensure-WorkspaceFolder {
     }
 }
 
+function Resolve-WorkspaceFolder {
+    param([string]$Path)
+
+    $normalized = Normalize-InputPath -Path $Path
+    if (-not $normalized) {
+        return $normalized
+    }
+    if (-not [System.IO.Path]::IsPathRooted($normalized)) {
+        $normalized = Join-Path (Get-Location) $normalized
+    }
+    return [System.IO.Path]::GetFullPath($normalized)
+}
+
 function Get-ApiKey {
     param([object]$Settings)
     $candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
@@ -135,36 +148,140 @@ function Select-InputMethod {
     }
 }
 
+function Get-WorkspaceFileCandidates {
+    param([string]$WorkspaceFolder)
+
+    $extensions = @('*.txt', '*.text', '*.rtf', '*.doc', '*.docx')
+    return Get-ChildItem -Path $WorkspaceFolder -File -Include $extensions | Sort-Object Name
+}
+
+function Test-SupportedInputFile {
+    param([string]$Path)
+
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    return $extension -in @('.txt', '.text', '.rtf', '.doc', '.docx')
+}
+
+function Resolve-InputFileSelection {
+    param(
+        [string]$Selection,
+        [string]$WorkspaceFolder,
+        [object[]]$Candidates
+    )
+
+    $inputValue = Normalize-InputPath -Path $Selection
+    if ([string]::IsNullOrWhiteSpace($inputValue)) {
+        return $null
+    }
+
+    if ($inputValue -match '^\d+$') {
+        $index = [int]$inputValue - 1
+        if ($index -ge 0 -and $index -lt $Candidates.Count) {
+            return $Candidates[$index].FullName
+        }
+        return $null
+    }
+
+    $candidatePath = $inputValue
+    if (-not [System.IO.Path]::IsPathRooted($candidatePath)) {
+        $candidatePath = Join-Path $WorkspaceFolder $candidatePath
+    }
+
+    if (Test-Path -LiteralPath $candidatePath) {
+        $item = Get-Item -LiteralPath $candidatePath
+        if (-not $item.PSIsContainer -and (Test-SupportedInputFile -Path $item.FullName)) {
+            return $item.FullName
+        }
+    }
+
+    $fileName = [System.IO.Path]::GetFileName($inputValue)
+    if ($fileName) {
+        $matching = $Candidates | Where-Object { $_.Name -ieq $fileName }
+        if ($matching.Count -eq 1) {
+            return $matching[0].FullName
+        }
+    }
+
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($inputValue)
+    if ($baseName) {
+        $matching = $Candidates | Where-Object { $_.BaseName -ieq $baseName }
+        if ($matching.Count -eq 1) {
+            return $matching[0].FullName
+        }
+    }
+
+    return $null
+}
+
 function Select-InputFile {
+    param([object]$Settings)
+
+    $workspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $workspaceFolder
+
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     } catch {
         Write-Warn 'File dialog not available. Falling back to manual path entry.'
     }
 
-    if ([System.Type]::GetType('System.Windows.Forms.OpenFileDialog')) {
-        $dialog = New-Object System.Windows.Forms.OpenFileDialog
-        $dialog.Title = 'Select a text or Word document'
-        $dialog.Filter = 'Text and Word Documents|*.txt;*.text;*.rtf;*.doc;*.docx|All Files|*.*'
-        $dialog.Multiselect = $false
-
-        $result = $dialog.ShowDialog()
-        if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $dialog.FileName) {
-            return $dialog.FileName
+    while ($true) {
+        $candidates = Get-WorkspaceFileCandidates -WorkspaceFolder $workspaceFolder
+        Write-Info ("Working directory: {0}" -f $workspaceFolder)
+        if ($candidates.Count -gt 0) {
+            Write-Info 'Files available in working directory:'
+            for ($i = 0; $i -lt $candidates.Count; $i++) {
+                Write-Host ("  {0}) {1}" -f ($i + 1), $candidates[$i].Name)
+            }
+        } else {
+            Write-Warn 'No supported files found in the working directory.'
         }
-    }
 
-    $manualPath = Read-Host 'Enter the full path to the input file'
-    $manualPath = Normalize-InputPath -Path $manualPath
-    if (-not (Test-Path -LiteralPath $manualPath)) {
-        throw "File not found: $manualPath"
+        if ([System.Type]::GetType('System.Windows.Forms.OpenFileDialog')) {
+            Write-Host '  d) Open file dialog'
+        }
+
+        $selection = Read-Host 'Enter file number, file name, or full path'
+        if ([string]::IsNullOrWhiteSpace($selection)) {
+            continue
+        }
+
+        if ($selection.Trim().ToLowerInvariant() -eq 'd' -and [System.Type]::GetType('System.Windows.Forms.OpenFileDialog')) {
+            $dialog = New-Object System.Windows.Forms.OpenFileDialog
+            $dialog.Title = 'Select a text or Word document'
+            $dialog.Filter = 'Text and Word Documents|*.txt;*.text;*.rtf;*.doc;*.docx|All Files|*.*'
+            $dialog.Multiselect = $false
+            $dialog.InitialDirectory = $workspaceFolder
+
+            $result = $dialog.ShowDialog()
+            if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $dialog.FileName) {
+                if (Test-SupportedInputFile -Path $dialog.FileName) {
+                    return $dialog.FileName
+                }
+                Write-Warn 'Selected file type is not supported.'
+            }
+            continue
+        }
+
+        $resolved = Resolve-InputFileSelection -Selection $selection -WorkspaceFolder $workspaceFolder -Candidates $candidates
+        if ($resolved) {
+            return $resolved
+        }
+
+        Write-Warn 'Selection did not match a readable file. Try again.'
     }
-    return $manualPath
 }
 
 function Select-InputFolder {
+    param([object]$Settings)
+
+    $workspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $workspaceFolder
     $manualPath = Read-Host 'Enter the full path to the folder'
     $manualPath = Normalize-InputPath -Path $manualPath
+    if ($manualPath -and -not [System.IO.Path]::IsPathRooted($manualPath)) {
+        $manualPath = Join-Path $workspaceFolder $manualPath
+    }
     if (-not (Test-Path -LiteralPath $manualPath)) {
         throw "Folder not found: $manualPath"
     }
@@ -641,6 +758,25 @@ function Test-Mp3File {
     return $true
 }
 
+function Invoke-FfmpegConcat {
+    param(
+        [string]$FfmpegPath,
+        [string]$ListPath,
+        [string]$OutputPath,
+        [bool]$Reencode
+    )
+
+    $arguments = @('-y', '-f', 'concat', '-safe', '0', '-i', $ListPath)
+    if ($Reencode) {
+        $arguments += @('-c:a', 'libmp3lame', '-q:a', '2')
+    } else {
+        $arguments += @('-c', 'copy')
+    }
+    $arguments += $OutputPath
+
+    return Start-Process -FilePath $FfmpegPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+}
+
 function Merge-Mp3Files {
     param(
         [string[]]$Files,
@@ -649,6 +785,10 @@ function Merge-Mp3Files {
 
     $ffmpeg = Ensure-Ffmpeg
     Write-Info ("FFmpeg path: {0}" -f $ffmpeg)
+    $outputFolder = Split-Path $OutputPath -Parent
+    if ($outputFolder) {
+        Ensure-WorkspaceFolder -Path $outputFolder
+    }
 
     Write-Info 'Ordering MP3 chunks by numeric suffix...'
     $orderedFiles = $Files | Sort-Object { Get-Mp3SortKey -Path $_ }
@@ -670,7 +810,7 @@ function Merge-Mp3Files {
         throw 'No valid MP3 chunks remain after validation.'
     }
 
-    $listPath = Join-Path $ScriptRoot ('ffmpeg-list-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    $listPath = Join-Path $outputFolder ('ffmpeg-list-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $content = $validFiles | ForEach-Object { "file '$($_.Replace("'", "''"))'" }
     Set-Content -Path $listPath -Value $content -Encoding UTF8
 
@@ -680,9 +820,16 @@ function Merge-Mp3Files {
 
     try {
         Write-Info ("Merging {0} chunks into {1}" -f $validFiles.Count, $OutputPath)
-        $process = Start-Process -FilePath $ffmpeg -ArgumentList @('-y', '-f', 'concat', '-safe', '0', '-i', $listPath, '-c', 'copy', $OutputPath) -NoNewWindow -Wait -PassThru
+        $process = Invoke-FfmpegConcat -FfmpegPath $ffmpeg -ListPath $listPath -OutputPath $OutputPath -Reencode $false
         if ($process.ExitCode -ne 0) {
-            throw ("FFmpeg merge failed with exit code {0}." -f $process.ExitCode)
+            Write-Warn ("FFmpeg stream copy merge failed (exit {0}). Retrying with re-encode..." -f $process.ExitCode)
+            if (Test-Path $OutputPath) {
+                Remove-Item $OutputPath -Force
+            }
+            $process = Invoke-FfmpegConcat -FfmpegPath $ffmpeg -ListPath $listPath -OutputPath $OutputPath -Reencode $true
+            if ($process.ExitCode -ne 0) {
+                throw ("FFmpeg merge failed with exit code {0}." -f $process.ExitCode)
+            }
         }
         Write-Success ("Merge complete: {0}" -f $OutputPath)
     } finally {
@@ -861,6 +1008,8 @@ function Split-BookIntoScenes {
         [object]$Settings
     )
 
+    $Settings.WorkspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $Settings.WorkspaceFolder
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
     $outputFolder = Join-Path $Settings.WorkspaceFolder ("{0}-split" -f $baseName)
     Ensure-WorkspaceFolder -Path $outputFolder
@@ -947,6 +1096,9 @@ function Invoke-TtsForText {
         [object]$Settings
     )
 
+    $Settings.WorkspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $Settings.WorkspaceFolder
+
     $cleanName = Get-ChapterNameFromInput -InputName $ChapterName
     if (-not $cleanName) {
         throw 'Chapter name cannot be blank after cleaning.'
@@ -983,6 +1135,10 @@ function Invoke-TtsForText {
     }
 
     $finalPath = Join-Path $Settings.WorkspaceFolder ("{0}.mp3" -f $cleanName)
+    if (Test-Path $finalPath) {
+        Write-Info ("Removing existing output file before merge: {0}" -f $finalPath)
+        Remove-Item $finalPath -Force
+    }
     if ($outputFiles.Count -gt 1) {
         Write-Info 'Merging chunks into final MP3...'
         try {
@@ -1011,12 +1167,15 @@ function Invoke-TtsForText {
 }
 
 $settings = Load-Settings
+$settings.WorkspaceFolder = Resolve-WorkspaceFolder -Path $settings.WorkspaceFolder
 Ensure-WorkspaceFolder -Path $settings.WorkspaceFolder
 Save-Settings -Settings $settings
+Write-Info ("Working directory initialized: {0}" -f $settings.WorkspaceFolder)
 
 while ($true) {
     Clear-HostSafe
     Write-Info 'Main Menu'
+    Write-Info ("Working directory: {0}" -f $settings.WorkspaceFolder)
     Write-Host '1) Create audio'
     Write-Host '2) Split book into chapters/scenes'
     Write-Host '9) Settings'
@@ -1031,14 +1190,14 @@ while ($true) {
             try {
                 if ($inputMethod -eq 'file') {
                     Write-Info 'Input method selected: file upload'
-                    $filePath = Select-InputFile
+                    $filePath = Select-InputFile -Settings $settings
                     $chapterName = Get-ChapterNameFromFile -FilePath $filePath
                     Write-Info ("Reading input file: {0}" -f $filePath)
                     $inputText = Get-TextFromFile -Path $filePath
                     Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
                 } elseif ($inputMethod -eq 'folder') {
                     Write-Info 'Input method selected: folder'
-                    $folderPath = Select-InputFolder
+                    $folderPath = Select-InputFolder -Settings $settings
                     Write-Info ("Scanning folder: {0}" -f $folderPath)
                     $files = Get-InputFilesFromFolder -FolderPath $folderPath
                     if (-not $files -or $files.Count -eq 0) {
@@ -1072,7 +1231,7 @@ while ($true) {
         }
         '2' {
             try {
-                $filePath = Select-InputFile
+                $filePath = Select-InputFile -Settings $settings
                 Split-BookIntoScenes -FilePath $filePath -Settings $settings
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
@@ -1093,8 +1252,9 @@ while ($true) {
                 'a' {
                     $newPath = Read-Host 'Enter new workspace folder'
                     if ($newPath) {
-                        Write-Info ("Updating workspace folder to: {0}" -f $newPath)
-                        $settings.WorkspaceFolder = $newPath
+                        $resolvedPath = Resolve-WorkspaceFolder -Path $newPath
+                        Write-Info ("Updating workspace folder to: {0}" -f $resolvedPath)
+                        $settings.WorkspaceFolder = $resolvedPath
                         Ensure-WorkspaceFolder -Path $settings.WorkspaceFolder
                         Save-Settings -Settings $settings
                         Write-Success 'Workspace folder updated.'
