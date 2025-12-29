@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-
+cls
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 4096
@@ -390,7 +390,12 @@ function Invoke-OpenAITts {
         Remove-Item $OutputPath -Force
     }
 
+
+
     try {
+        Write-Info $uri
+        Write-Info $headers.ToString()
+        Write-Info $body.ToString()
         Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
     } catch {
         if (Test-Path $OutputPath) {
@@ -400,7 +405,9 @@ function Invoke-OpenAITts {
         $errorDetails.Add('OpenAI TTS request failed.')
         $errorDetails.Add(("Request URL: {0}" -f $uri))
         $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
-        $errorDetails.Add(("Request headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
+        $unredactedHeaders = Get-UnRedactedHeadersForLog -Headers $headers
+        $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4) ))
+        $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
         $errorDetails.Add(("Request body: {0}" -f $body))
         $response = $_.Exception.Response
         if ($response) {
@@ -696,6 +703,16 @@ function Get-RedactedHeadersForLog {
         } else {
             $copy[$key] = $Headers[$key]
         }
+    }
+    return $copy
+}
+
+function Get-UnRedactedHeadersForLog {
+    param([hashtable]$Headers)
+
+    $copy = @{}
+    foreach ($key in $Headers.Keys) {
+            $copy[$key] = $Headers[$key]
     }
     return $copy
 }
