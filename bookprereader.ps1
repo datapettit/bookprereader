@@ -373,14 +373,27 @@ function Invoke-OpenAITts {
     )
 
     $uri = 'https://api.openai.com/v1/audio/speech'
-    $headers = @{ Authorization = "Bearer $ApiKey" }
+    $headers = @{
+        Authorization = "Bearer $ApiKey"
+        'Content-Type' = 'application/json'
+    }
     $bodyObject = @{
         model = $Model
         input = $Text
         voice = $Voice
-        format = 'mp3'
+        response_format = 'mp3'
     }
     $body = $bodyObject | ConvertTo-Json -Depth 4
+    $contentType = 'application/json'
+    $requestHeadersRaw = $headers | ConvertTo-Json -Depth 4
+    $requestDump = @(
+        '--- OpenAI TTS Request ---'
+        ("URI: {0}" -f $uri)
+        ("Headers: {0}" -f $requestHeadersRaw)
+        ("Body: {0}" -f $body)
+        ("Content-Type: {0}" -f $contentType)
+        '--------------------------'
+    ) -join [Environment]::NewLine
 
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
@@ -390,11 +403,22 @@ function Invoke-OpenAITts {
 
     while ($true) {
         try {
-            Write-Warn $uri
-            Write-Info $ApiKey
-            Write-Info $headers.ToString()
-            Write-Info $body.ToString()
-            Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
+            Write-Warn $requestDump
+            $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType $contentType -OutFile $OutputPath -PassThru -ErrorAction Stop
+            $responseHeadersRaw = $response.Headers | ConvertTo-Json -Depth 6
+            $responseBodyRaw = ''
+            if (Test-Path $OutputPath) {
+                $responseBytes = [System.IO.File]::ReadAllBytes($OutputPath)
+                $responseBodyRaw = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($responseBytes)
+            }
+            $responseDump = @(
+                '--- OpenAI TTS Response ---'
+                ("Status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription)
+                ("Headers: {0}" -f $responseHeadersRaw)
+                ("Body (raw): {0}" -f $responseBodyRaw)
+                '---------------------------'
+            ) -join [Environment]::NewLine
+            Write-Info $responseDump
             return
         } catch {
             if (Test-Path $OutputPath) {
@@ -405,9 +429,10 @@ function Invoke-OpenAITts {
             $errorDetails.Add(("Request URL: {0}" -f $uri))
             $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
             $unredactedHeaders = Get-UnRedactedHeadersForLog -Headers $headers
-            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4) ))
+            $errorDetails.Add(("Request raw headers: {0}" -f ($unredactedHeaders | ConvertTo-Json -Depth 4)))
             $errorDetails.Add(("Request redacted headers: {0}" -f ($redactedHeaders | ConvertTo-Json -Depth 4)))
             $errorDetails.Add(("Request body: {0}" -f $body))
+            $errorDetails.Add(("Request content-type: {0}" -f $contentType))
             $response = $_.Exception.Response
             if ($response) {
                 $errorDetails.Add(("Response status: {0} {1}" -f [int]$response.StatusCode, $response.StatusDescription))
