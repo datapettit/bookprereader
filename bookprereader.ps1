@@ -5,7 +5,7 @@ $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 4096
 $SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
 $SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
-$DefaultApiKey = ''
+$DefaultApiKey = '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'
 $EnableClearHost = $false
 $IsWindows = $false
 if ($env:OS -eq 'Windows_NT') {
