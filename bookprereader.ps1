@@ -78,16 +78,12 @@ function Ensure-WorkspaceFolder {
 
 function Get-ApiKey {
     param([object]$Settings)
-
-    $candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
+    #$candidate = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { $Settings.ApiKey }
+    $candidate =  $Settings.ApiKey 
+    Write-Info "Settings ApiKey"
+    Write-Info $candidate
     if ($candidate) {
         $candidate = $candidate.Trim()
-        if ($candidate.Length -ge 2) {
-            if (($candidate.StartsWith('"') -and $candidate.EndsWith('"')) -or ($candidate.StartsWith("'") -and $candidate.EndsWith("'"))) {
-                $candidate = $candidate.Substring(1, $candidate.Length - 2)
-            }
-        }
-        $candidate = $candidate -replace '[\r\n]+', ''
     }
     if ([string]::IsNullOrWhiteSpace($candidate)) {
         throw 'OpenAI API key is missing. Set OPENAI_API_KEY or update it in Settings.'
@@ -394,7 +390,8 @@ function Invoke-OpenAITts {
 
     while ($true) {
         try {
-            Write-Info $uri
+            Write-Warn $uri
+            Write-Info $ApiKey
             Write-Info $headers.ToString()
             Write-Info $body.ToString()
             Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -ErrorAction Stop
@@ -439,40 +436,13 @@ function Invoke-OpenAITts {
             }
             $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
             $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
-            Write-ErrorMessage ($errorDetails -join [Environment]::NewLine)
-
-            Write-Warn 'TTS request failed. Choose an option:'
-            Write-Host '  1) Retry'
-            Write-Host '  2) Exit'
-            Write-Host 'Debug helper: paste this in Chrome DevTools console to retry:'
-            $jsBody = ($body -replace '\\', '\\\\' -replace "'", "\\'")
-            $jsBody = ($jsBody -replace "`r", '' -replace "`n", '\n')
-            $jsSnippet = @"
-fetch('$uri', {
-  method: 'POST',
-  headers: {
-    'Authorization': 'Bearer YOUR_API_KEY',
-    'Content-Type': 'application/json'
-  },
-  body: '$jsBody'
-}).then(async (res) => {
-  const text = await res.text();
-  console.log('Status:', res.status, res.statusText);
-  console.log('Headers:', Object.fromEntries(res.headers.entries()));
-  console.log('Body:', text);
-}).catch(err => console.error(err));
-"@
-            Write-Host $jsSnippet
+          
             while ($true) {
-                $choice = (Read-Host 'Enter 1 to retry or 2 to exit').Trim()
+                $choice = (Read-Host 'Enter 1').Trim()
                 if ($choice -eq '1') {
-                    Read-Host 'Paste your debug results and press Enter when ready to retry'
-                    break
-                }
-                if ($choice -eq '2') {
                     throw 'OpenAI TTS request aborted by user.'
                 }
-                Write-Warn 'Invalid selection. Enter 1 or 2.'
+                Write-Warn 'Invalid selection. Enter 1.'
             }
         }
     }
@@ -788,6 +758,7 @@ function Invoke-TtsForText {
     Write-Success ("Prepared {0} chunks for TTS." -f $chunks.Count)
     $apiKey = Get-ApiKey -Settings $Settings
     Write-Info 'API key detected for TTS requests.'
+    Write-Warn $apiKey
 
     $outputFiles = New-Object System.Collections.Generic.List[string]
     $ffmpegPath = $null
