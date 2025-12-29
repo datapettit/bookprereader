@@ -544,20 +544,7 @@ function Invoke-OpenAITts {
 
     for ($attempt = 0; $attempt -le 2; $attempt++) {
         try {
-            Write-Info 'OpenAI TTS request details (full):'
-            Write-Info ("  URL: {0}" -f $uri)
-            Write-Info ("  Headers (raw): {0}" -f ($headers | ConvertTo-Json -Depth 6))
-            Write-Info ("  Headers (redacted): {0}" -f ((Get-RedactedHeadersForLog -Headers $headers) | ConvertTo-Json -Depth 6))
-            Write-Info ("  Body: {0}" -f $body)
-            Write-Info ("  Output path: {0}" -f $OutputPath)
-
             $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -PassThru -ErrorAction Stop
-            Write-Info 'OpenAI TTS response details (success):'
-            Write-Info ("  Status: {0} {1}" -f $response.StatusCode, $response.StatusDescription)
-            Write-Info ("  Headers: {0}" -f ($response.Headers | ConvertTo-Json -Depth 6))
-            if ($response.Headers['x-request-id']) {
-                Write-Info ("  OpenAI request id: {0}" -f $response.Headers['x-request-id'])
-            }
 
             return
         } catch {
@@ -608,6 +595,28 @@ function Invoke-OpenAITts {
             } else {
                 $errorDetails.Add('Response: (none)')
             }
+            $bodyByteLength = [System.Text.Encoding]::UTF8.GetByteCount($body)
+            $requestLines = New-Object System.Collections.Generic.List[string]
+            $requestLines.Add(("POST {0} HTTP/1.1" -f $uri))
+            foreach ($headerKey in $headers.Keys) {
+                $requestLines.Add(("{0}: {1}" -f $headerKey, $headers[$headerKey]))
+            }
+            $requestLines.Add(("Content-Length: {0}" -f $bodyByteLength))
+            $requestLines.Add('')
+            $requestLines.Add($body)
+            $errorDetails.Add(("Request raw: {0}" -f ($requestLines -join "`r`n")))
+            if ($response) {
+                $responseLines = New-Object System.Collections.Generic.List[string]
+                $responseLines.Add(("HTTP/{0} {1} {2}" -f $response.ProtocolVersion, [int]$response.StatusCode, $response.StatusDescription))
+                foreach ($headerKey in $response.Headers.Keys) {
+                    $responseLines.Add(("{0}: {1}" -f $headerKey, $response.Headers[$headerKey]))
+                }
+                $responseLines.Add('')
+                if ($details) {
+                    $responseLines.Add($details)
+                }
+                $errorDetails.Add(("Response raw: {0}" -f ($responseLines -join "`r`n")))
+            }
             $errorDetails.Add(("Request headers (full): {0}" -f ($headers | ConvertTo-Json -Depth 6)))
             $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
             $errorDetails.Add(("Exception message: {0}" -f $_.Exception.Message))
@@ -621,6 +630,7 @@ function Invoke-OpenAITts {
                     ("Headers: {0}" -f ($headers | ConvertTo-Json -Depth 6))
                     ("Body: {0}" -f $body)
                     ("Output path: {0}" -f $OutputPath)
+                    ("Raw request: {0}" -f ($requestLines -join "`r`n"))
                 )
                 Set-Content -Path $debugRequestPath -Value $requestDump -Encoding UTF8
             } catch {
@@ -631,6 +641,7 @@ function Invoke-OpenAITts {
                 if ($response) {
                     $responseDump += ("Response: {0}" -f ($response | Out-String))
                     $responseDump += ("Response headers (raw): {0}" -f ($response.Headers | Out-String))
+                    $responseDump += ("Raw response: {0}" -f ($responseLines -join "`r`n"))
                 } else {
                     $responseDump += 'Response: (none)'
                 }
