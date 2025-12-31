@@ -707,11 +707,12 @@ function Invoke-OpenAITts {
 
 
     $safeText = Convert-ToJsonSafeText -Text $Text
+    $safeInstructions = Convert-ToJsonSafeText -Text $Instructions
     $bodyObject = @{
         model = $Model
         input = $safeText
         voice = $Voice
-        instructions = $Instructions
+        instructions = $safeInstructions
     }
     
     $body = $bodyObject | ConvertTo-Json -Depth 4
