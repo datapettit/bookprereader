@@ -703,7 +703,7 @@ function Invoke-OpenAITts {
     }
 
     if ($Voice -eq "" -OR  $Voice -eq $null){   $Voice = "nova"  }
-    if ($Instructions -eq "" -OR  $Instructions -eq $null){   $Instructions = "Novel storyteller narrtor, dynamic and vibrant, feelings and depth."
+    if ($Instructions -eq "" -OR  $Instructions -eq $null){   $Instructions = "Novel storyteller narrtor, dynamic and vibrant, feelings and depth." }
 
 
     $safeText = Convert-ToJsonSafeText -Text $Text
