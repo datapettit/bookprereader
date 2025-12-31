@@ -1219,18 +1219,17 @@ function Get-SceneSeparatorInfo {
     }
 
     $trimmed = $Line.Trim()
-    if ($trimmed -match '^(Scene|Chapter)$') {
-        return @{
-            Type = $Matches[1]
-            Title = $null
-            RawLine = $trimmed
+    if ($trimmed -match '^(Scene|Chapter)\b(?:\s+\d{1,3})?\s*(?:-\s*(.*))?$') {
+        $title = $null
+        if ($Matches[2]) {
+            $candidate = $Matches[2].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                $title = $candidate
+            }
         }
-    }
-
-    if ($trimmed -match '^(Scene|Chapter)\s*-\s*(.+)$') {
         return @{
             Type = $Matches[1]
-            Title = $Matches[2].Trim()
+            Title = $title
             RawLine = $trimmed
         }
     }
