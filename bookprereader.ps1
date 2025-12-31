@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 cls
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SettingsPath = Join-Path $ScriptRoot 'settings.json'
-$MaxInputCharacters = 4096
+$MaxInputCharacters = 3900
 $SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
 $SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
 $DefaultApiKey = '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'
@@ -516,6 +516,40 @@ function Convert-ToJsonSafeText {
     return $normalized
 }
 
+function Get-JsonEncodedLength {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return 0
+    }
+
+    $jsonValue = $Text | ConvertTo-Json -Compress
+    if ($jsonValue.Length -ge 2 -and $jsonValue[0] -eq '"' -and $jsonValue[$jsonValue.Length - 1] -eq '"') {
+        return $jsonValue.Length - 2
+    }
+    return $jsonValue.Length
+}
+
+function Get-JsonSafeChunks {
+    param(
+        [string]$Text,
+        [int]$Limit
+    )
+
+    $currentLimit = $Limit
+    while ($currentLimit -gt 0) {
+        $chunks = Split-TextIntoChunks -Text $Text -Limit $currentLimit
+        $oversized = $chunks | Where-Object { (Get-JsonEncodedLength -Text (Convert-ToJsonSafeText -Text $_)) -gt $currentLimit }
+        if ($oversized.Count -eq 0) {
+            return $chunks
+        }
+        $currentLimit = [Math]::Max([int][Math]::Floor($currentLimit * 0.8), 1)
+        Write-Warn ("Detected chunk(s) exceeding JSON-safe length. Reducing chunk limit to {0} and retrying..." -f $currentLimit)
+    }
+
+    throw 'Unable to split text into JSON-safe chunks within size limits.'
+}
+
 function Invoke-OpenAITts {
     param(
         [string]$Text,
@@ -582,10 +616,11 @@ function Invoke-OpenAITts {
                     try {
                         $details = $reader.ReadToEnd()
                         if ($details) {
-                            $errorDetails.Add(("Response body: {0}" -f $details))
-                        } else {
-                            $errorDetails.Add('Response body: (empty)')
-                        }
+            $errorDetails.Add(("Response body: {0}" -f $details))
+            Write-ErrorMessage ("Response body (raw): {0}" -f $details)
+        } else {
+            $errorDetails.Add('Response body: (empty)')
+        }
                     } finally {
                         $reader.Close()
                     }
@@ -616,6 +651,7 @@ function Invoke-OpenAITts {
                     $responseLines.Add($details)
                 }
                 $errorDetails.Add(("Response raw: {0}" -f ($responseLines -join "`r`n")))
+                Write-ErrorMessage ("Response raw: {0}" -f ($responseLines -join "`r`n"))
             }
             $errorDetails.Add(("Request headers (full): {0}" -f ($headers | ConvertTo-Json -Depth 6)))
             $errorDetails.Add(("Exception type: {0}" -f $_.Exception.GetType().FullName))
@@ -1385,7 +1421,7 @@ function Invoke-TtsForText {
 
     Write-Info ("Chapter name set to: {0}" -f $cleanName)
     Write-Info 'Splitting text into chunks...'
-    $chunks = Split-TextIntoChunks -Text $text -Limit $MaxInputCharacters
+    $chunks = Get-JsonSafeChunks -Text $text -Limit $MaxInputCharacters
     if ($chunks.Count -eq 0) {
         throw 'No usable text detected after splitting.'
     }
