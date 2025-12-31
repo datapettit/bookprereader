@@ -148,7 +148,7 @@ function Get-VoiceProfile {
                 PovName = 'Lucien'
                 VoiceName = 'Lucien'
                 Voice = 'ash'
-                Instructions = 'Speak with effortless charm and dark warmth, words rolling smoothly with a faint Latin cadence and playful confidence. His voice carries humor, sarcasm, and lived-in sensuality—jokes as armor, flirtation as instinct—yet there’s a dangerous sincerity beneath it all. Let the tone smile even when the meaning cuts, romantic and shadowed, like someone who laughs easily because he’s seen worse.'
+                Instructions = 'Speak with effortless charm and dark warmth, words rolling smoothly with a faint Latin cadence and playful confidence. His voice carries humor, sarcasm, and lived-in sensualityâ€”jokes as armor, flirtation as instinctâ€”yet thereâ€™s a dangerous sincerity beneath it all. Let the tone smile even when the meaning cuts, romantic and shadowed, like someone who laughs easily because heâ€™s seen worse.'
                 WasDetected = $wasDetected
             }
         }
@@ -157,7 +157,7 @@ function Get-VoiceProfile {
                 PovName = 'Elias'
                 VoiceName = 'Elias'
                 Voice = 'onyx'
-                Instructions = 'Speak with measured clarity and gentle authority, as someone used to thinking three steps ahead and keeping others steady. His tone is calm, reassuring, and quietly upbeat, even when concern runs deep—worry is present, but never allowed to panic the room. Let warmth come through restraint: a healer who believes composure is care, and who smiles lightly so others don’t have to carry his fear.'
+                Instructions = 'Speak with measured clarity and gentle authority, as someone used to thinking three steps ahead and keeping others steady. His tone is calm, reassuring, and quietly upbeat, even when concern runs deepâ€”worry is present, but never allowed to panic the room. Let warmth come through restraint: a healer who believes composure is care, and who smiles lightly so others donâ€™t have to carry his fear.'
                 WasDetected = $wasDetected
             }
         }
@@ -175,7 +175,7 @@ function Get-VoiceProfile {
                 PovName = 'Ori'
                 VoiceName = 'Ori'
                 Voice = 'nova'
-                Instructions = 'Speak softly with a warm island cadence, vowels rounded and gentle, as if the ocean still lives in her breath. There’s restraint in every line—she’s careful not to take up too much space—yet an undercurrent of longing leaks through, a need to be useful, to be good, to belong without being a burden. Let vulnerability sit just beneath the words, like pressure held behind the ribs, breaking through only in quiet pauses or softened ends of sentences.'
+                Instructions = 'Speak softly with a warm island cadence, vowels rounded and gentle, as if the ocean still lives in her breath. Thereâ€™s restraint in every lineâ€”sheâ€™s careful not to take up too much spaceâ€”yet an undercurrent of longing leaks through, a need to be useful, to be good, to belong without being a burden. Let vulnerability sit just beneath the words, like pressure held behind the ribs, breaking through only in quiet pauses or softened ends of sentences.'
                 WasDetected = $wasDetected
             }
         }
@@ -701,20 +701,19 @@ function Invoke-OpenAITts {
         "Authorization" = "Bearer $ApiKey"
         "Content-Type"  = "application/json"
     }
+
+    if ($Voice -eq "" -OR  $Voice -eq $null){   $Voice = "nova"  }
+    if ($Instructions -eq "" -OR  $Instructions -eq $null){   $Instructions = "Novel storyteller narrtor, dynamic and vibrant, feelings and depth."
+
+
     $safeText = Convert-ToJsonSafeText -Text $Text
     $bodyObject = @{
         model = $Model
         input = $safeText
+        voice = $Voice
+        instructions = $Instructions
     }
-    if ($VoiceName) {
-        $bodyObject.voiceName = $VoiceName
-    }
-    if ($Voice) {
-        $bodyObject.voice = $Voice
-    }
-    if ($Instructions) {
-        $bodyObject.instructions = $Instructions
-    }
+    
     $body = $bodyObject | ConvertTo-Json -Depth 4
 
     if (Test-Path $OutputPath) {
@@ -727,6 +726,7 @@ function Invoke-OpenAITts {
 
             return
         } catch {
+            Write-Error $body
             Write-Error $_.Exception.ToString()
             Write-Error $_.ToString()
             $errorDetails = New-Object System.Collections.Generic.List[string]
@@ -1644,10 +1644,14 @@ function Invoke-TtsForText {
     $mergeSucceeded = $false
     $mergeError = $null
 
+     Write-Info $voiceProfile.VoiceName
+      Write-Info $voiceProfile.Instructions
+
     for ($i = 0; $i -lt $chunks.Count; $i++) {
         $index = $i + 1
         $chunkPath = Join-Path $Settings.WorkspaceFolder ("{0}_{1}.mp3" -f $cleanName, $index)
         Write-Info ("Creating audio chunk {0}/{1} -> {2}" -f $index, $chunks.Count, $chunkPath)
+        Write-Info $chunks[$i]
         Invoke-OpenAITts -Text $chunks[$i] -Voice $voiceProfile.Voice -VoiceName $voiceProfile.VoiceName -Instructions $voiceProfile.Instructions -Model $Settings.Model -ApiKey $apiKey -OutputPath $chunkPath
         Write-Success ("Chunk created: {0}" -f $chunkPath)
         $outputFiles.Add($chunkPath)
