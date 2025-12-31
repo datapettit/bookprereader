@@ -1238,6 +1238,34 @@ function Get-SceneSeparatorInfo {
     return $null
 }
 
+function Get-PovName {
+    param([string]$Line)
+
+    if ($null -eq $Line) {
+        return $null
+    }
+
+    $trimmed = $Line.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return $null
+    }
+
+    $povMap = @{
+        'ori' = 'Ori'
+        'lucien' = 'Lucien'
+        'elias' = 'Elias'
+        'aleric' = 'Aleric'
+        'kasia' = 'Kasia'
+    }
+
+    $key = $trimmed.ToLowerInvariant()
+    if ($povMap.ContainsKey($key)) {
+        return $povMap[$key]
+    }
+
+    return $null
+}
+
 function Sanitize-FileName {
     param([string]$Name)
 
@@ -1322,10 +1350,16 @@ function Split-BookIntoScenes {
     $chunks = New-Object System.Collections.Generic.List[object]
     $currentLines = New-Object System.Collections.Generic.List[string]
     $currentInfo = $null
+    $currentPov = $null
     $knownTitles = New-Object System.Collections.Generic.List[string]
 
     foreach ($line in $lines) {
         $separatorInfo = Get-SceneSeparatorInfo -Line $line
+        $povName = Get-PovName -Line $line
+        if ($povName) {
+            $currentPov = $povName
+            continue
+        }
         if ($separatorInfo) {
             if ($currentLines.Count -gt 0) {
                 $chunks.Add([pscustomobject]@{
@@ -1335,7 +1369,9 @@ function Split-BookIntoScenes {
                 $currentLines.Clear()
             }
             $currentInfo = $separatorInfo
-            $currentLines.Add($line)
+            if ($currentPov) {
+                $currentInfo.Pov = $currentPov
+            }
             continue
         }
         $currentLines.Add($line)
@@ -1380,12 +1416,35 @@ function Split-BookIntoScenes {
             }
         }
 
-        $displayName = if ($title) { "$type - $title" } else { $type }
         $sceneIndex = $index.ToString('D3')
-        $fileName = Sanitize-FileName -Name ("{0} - {1}.txt" -f $sceneIndex, $displayName)
+        $povName = $null
+        if ($info -and $info.Pov) {
+            $povName = $info.Pov
+        }
+        if ($povName -and $title) {
+            $displayName = "{0} {1} - {2} - {3}" -f $type, $sceneIndex, $povName, $title
+        } elseif ($povName) {
+            $displayName = "{0} {1} - {2}" -f $type, $sceneIndex, $povName
+        } elseif ($title) {
+            $displayName = "{0} {1} - {2}" -f $type, $sceneIndex, $title
+        } else {
+            $displayName = "{0} {1}" -f $type, $sceneIndex
+        }
+        $fileName = Sanitize-FileName -Name ("{0}.txt" -f $displayName)
         $outputPath = Join-Path $outputFolder $fileName
 
-        Set-Content -Path $outputPath -Value $chunk.Content -Encoding UTF8
+        $contentLines = $chunk.Content -split '\r?\n'
+        while ($contentLines.Count -gt 0 -and [string]::IsNullOrWhiteSpace($contentLines[0])) {
+            $contentLines = $contentLines | Select-Object -Skip 1
+        }
+        $contentBody = $contentLines -join "`n"
+        if ([string]::IsNullOrWhiteSpace($contentBody)) {
+            $outputContent = $displayName
+        } else {
+            $outputContent = "{0}`n`n{1}" -f $displayName, $contentBody
+        }
+
+        Set-Content -Path $outputPath -Value $outputContent -Encoding UTF8
         Write-Success ("Saved: {0}" -f $outputPath)
         if ($title) {
             $knownTitles.Add($title)
