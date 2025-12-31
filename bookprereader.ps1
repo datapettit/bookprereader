@@ -3,8 +3,8 @@ cls
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 3900
-$SupportedModels = @('gpt-4o-mini-tts', 'tts-1', 'tts-1-hd')
-$SupportedVoices = @('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
+$SupportedModels = @('gpt-4o-mini-tts')
+$SupportedVoices = @('alloy', 'ash', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
 $DefaultApiKey = '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'
 $EnableClearHost = $false
 $IsWindows = $false
@@ -107,6 +107,79 @@ function Get-ApiKey {
         throw 'OpenAI API key is missing. Set OPENAI_API_KEY or update it in Settings.'
     }
     return $candidate
+}
+
+function Get-ScenePovFromName {
+    param([string]$SourceName)
+
+    if ([string]::IsNullOrWhiteSpace($SourceName)) {
+        return $null
+    }
+
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourceName)
+    if ([string]::IsNullOrWhiteSpace($baseName)) {
+        return $null
+    }
+
+    $match = [regex]::Match($baseName, '(?i)\b(ori|lucien|luicien|elias|aelric)\b')
+    if ($match.Success) {
+        return $match.Groups[1].Value
+    }
+
+    return $null
+}
+
+function Get-VoiceProfile {
+    param([string]$SourceName)
+
+    $povName = Get-ScenePovFromName -SourceName $SourceName
+    $wasDetected = $true
+    if ([string]::IsNullOrWhiteSpace($povName)) {
+        $povName = 'Ori'
+        $wasDetected = $false
+    }
+    if ($povName.ToLowerInvariant() -eq 'luicien') {
+        $povName = 'Lucien'
+    }
+
+    switch ($povName.ToLowerInvariant()) {
+        'lucien' {
+            return [pscustomobject]@{
+                PovName = 'Lucien'
+                VoiceName = 'Lucien'
+                Voice = 'ash'
+                Instructions = 'Speak with effortless charm and dark warmth, words rolling smoothly with a faint Latin cadence and playful confidence. His voice carries humor, sarcasm, and lived-in sensuality—jokes as armor, flirtation as instinct—yet there’s a dangerous sincerity beneath it all. Let the tone smile even when the meaning cuts, romantic and shadowed, like someone who laughs easily because he’s seen worse.'
+                WasDetected = $wasDetected
+            }
+        }
+        'elias' {
+            return [pscustomobject]@{
+                PovName = 'Elias'
+                VoiceName = 'Elias'
+                Voice = 'onyx'
+                Instructions = 'Speak with measured clarity and gentle authority, as someone used to thinking three steps ahead and keeping others steady. His tone is calm, reassuring, and quietly upbeat, even when concern runs deep—worry is present, but never allowed to panic the room. Let warmth come through restraint: a healer who believes composure is care, and who smiles lightly so others don’t have to carry his fear.'
+                WasDetected = $wasDetected
+            }
+        }
+        'aelric' {
+            return [pscustomobject]@{
+                PovName = 'Aelric'
+                VoiceName = 'Aelric'
+                Voice = $null
+                Instructions = $null
+                WasDetected = $wasDetected
+            }
+        }
+        default {
+            return [pscustomobject]@{
+                PovName = 'Ori'
+                VoiceName = 'Ori'
+                Voice = 'nova'
+                Instructions = 'Speak softly with a warm island cadence, vowels rounded and gentle, as if the ocean still lives in her breath. There’s restraint in every line—she’s careful not to take up too much space—yet an undercurrent of longing leaks through, a need to be useful, to be good, to belong without being a burden. Let vulnerability sit just beneath the words, like pressure held behind the ribs, breaking through only in quiet pauses or softened ends of sentences.'
+                WasDetected = $wasDetected
+            }
+        }
+    }
 }
 
 function Select-Voice {
@@ -421,71 +494,24 @@ function Read-PastedText {
     return ($lines -join "`n")
 }
 
-function Split-TextIntoChunks {
+function Get-ParagraphsFromText {
     param(
-        [string]$Text,
-        [int]$Limit
+        [string]$Text
     )
 
-    $chunks = New-Object System.Collections.Generic.List[string]
-    $paragraphs = $Text -split "(?:\r?\n){2,}"
-    $current = ''
+    if ($null -eq $Text) {
+        return @()
+    }
 
+    $paragraphs = $Text -split "(?:\r?\n){2,}"
+    $cleaned = New-Object System.Collections.Generic.List[string]
     foreach ($paragraph in $paragraphs) {
         $clean = $paragraph.Trim()
-        if (-not $clean) {
-            continue
-        }
-        if ($current -and (($current.Length + $clean.Length + 2) -gt $Limit)) {
-            $chunks.Add($current.Trim())
-            $current = ''
-        }
-
-        if ($clean.Length -gt $Limit) {
-            Write-Warn ("Paragraph exceeds limit ({0} chars). Splitting by sentences." -f $clean.Length)
-            $sentences = $clean -split '(?<=[.!?])\s+'
-            $buffer = ''
-            foreach ($sentence in $sentences) {
-                if ([string]::IsNullOrWhiteSpace($sentence)) {
-                    continue
-                }
-                if ($buffer -and (($buffer.Length + $sentence.Length + 1) -gt $Limit)) {
-                    $chunks.Add($buffer.Trim())
-                    $buffer = ''
-                }
-                if ($sentence.Length -gt $Limit) {
-                    $offset = 0
-                    while ($offset -lt $sentence.Length) {
-                        $sliceLength = [Math]::Min($Limit, $sentence.Length - $offset)
-                        $chunks.Add($sentence.Substring($offset, $sliceLength))
-                        $offset += $sliceLength
-                    }
-                } else {
-                    if ($buffer) {
-                        $buffer += " $sentence"
-                    } else {
-                        $buffer = $sentence
-                    }
-                }
-            }
-            if ($buffer) {
-                $chunks.Add($buffer.Trim())
-            }
-            continue
-        }
-
-        if ($current) {
-            $current += "`n`n$clean"
-        } else {
-            $current = $clean
+        if ($clean) {
+            $cleaned.Add($clean)
         }
     }
-
-    if ($current) {
-        $chunks.Add($current.Trim())
-    }
-
-    return $chunks
+    return $cleaned.ToArray()
 }
 
 function Normalize-TextForJson {
@@ -530,30 +556,141 @@ function Get-JsonEncodedLength {
     return $jsonValue.Length
 }
 
+function Get-JsonSafeLength {
+    param([string]$Text)
+
+    return (Get-JsonEncodedLength -Text (Convert-ToJsonSafeText -Text $Text))
+}
+
+function Join-ParagraphRange {
+    param(
+        [string[]]$Paragraphs,
+        [int]$StartIndex,
+        [int]$EndIndex
+    )
+
+    if ($StartIndex -gt $EndIndex) {
+        return ''
+    }
+    return ($Paragraphs[$StartIndex..$EndIndex] -join "`n`n")
+}
+
+function Split-LongParagraphIntoChunks {
+    param(
+        [string]$Paragraph,
+        [int]$Limit
+    )
+
+    Write-Warn ("Paragraph exceeds limit ({0} chars). Splitting by sentences." -f $Paragraph.Length)
+    $chunks = New-Object System.Collections.Generic.List[string]
+    $sentences = $Paragraph -split '(?<=[.!?])\s+'
+    $buffer = ''
+
+    foreach ($sentence in $sentences) {
+        if ([string]::IsNullOrWhiteSpace($sentence)) {
+            continue
+        }
+
+        $candidate = if ($buffer) { "$buffer $sentence" } else { $sentence }
+        if ((Get-JsonSafeLength -Text $candidate) -le $Limit) {
+            $buffer = $candidate
+            continue
+        }
+
+        if ($buffer) {
+            $chunks.Add($buffer.Trim())
+            $buffer = ''
+        }
+
+        if ((Get-JsonSafeLength -Text $sentence) -le $Limit) {
+            $buffer = $sentence
+            continue
+        }
+
+        $offset = 0
+        while ($offset -lt $sentence.Length) {
+            $sliceLength = [Math]::Min($Limit, $sentence.Length - $offset)
+            $slice = $sentence.Substring($offset, $sliceLength)
+            while ($sliceLength -gt 1 -and (Get-JsonSafeLength -Text $slice) -gt $Limit) {
+                $sliceLength--
+                $slice = $sentence.Substring($offset, $sliceLength)
+            }
+            $chunks.Add($slice)
+            $offset += $sliceLength
+        }
+    }
+
+    if ($buffer) {
+        $chunks.Add($buffer.Trim())
+    }
+
+    return $chunks
+}
+
 function Get-JsonSafeChunks {
     param(
         [string]$Text,
         [int]$Limit
     )
 
-    $currentLimit = $Limit
-    while ($currentLimit -gt 0) {
-        $chunks = Split-TextIntoChunks -Text $Text -Limit $currentLimit
-        $oversized = $chunks | Where-Object { (Get-JsonEncodedLength -Text (Convert-ToJsonSafeText -Text $_)) -gt $currentLimit }
-        if ($oversized.Count -eq 0) {
-            return $chunks
+    $paragraphs = Get-ParagraphsFromText -Text $Text
+    $chunks = New-Object System.Collections.Generic.List[string]
+    $index = 0
+
+    while ($index -lt $paragraphs.Count) {
+        $end = $index
+        $candidate = $paragraphs[$index]
+        while ($end -lt $paragraphs.Count -and $candidate.Length -le $Limit) {
+            $nextIndex = $end + 1
+            if ($nextIndex -ge $paragraphs.Count) {
+                break
+            }
+            $nextCandidate = Join-ParagraphRange -Paragraphs $paragraphs -StartIndex $index -EndIndex $nextIndex
+            if ($nextCandidate.Length -gt $Limit) {
+                break
+            }
+            $end = $nextIndex
+            $candidate = $nextCandidate
         }
-        $currentLimit = [Math]::Max([int][Math]::Floor($currentLimit * 0.8), 1)
-        Write-Warn ("Detected chunk(s) exceeding JSON-safe length. Reducing chunk limit to {0} and retrying..." -f $currentLimit)
+
+        if ($candidate.Length -gt $Limit) {
+            $longChunks = Split-LongParagraphIntoChunks -Paragraph $paragraphs[$index] -Limit $Limit
+            foreach ($chunk in $longChunks) {
+                $chunks.Add($chunk)
+            }
+            $index++
+            continue
+        }
+
+        $safeLength = Get-JsonSafeLength -Text $candidate
+        while ($safeLength -gt $Limit -and $end -gt $index) {
+            $end--
+            $candidate = Join-ParagraphRange -Paragraphs $paragraphs -StartIndex $index -EndIndex $end
+            $safeLength = Get-JsonSafeLength -Text $candidate
+        }
+
+        if ($safeLength -le $Limit) {
+            $chunks.Add($candidate)
+            $index = $end + 1
+            continue
+        }
+
+        $longChunks = Split-LongParagraphIntoChunks -Paragraph $paragraphs[$index] -Limit $Limit
+        foreach ($chunk in $longChunks) {
+            $chunks.Add($chunk)
+        }
+        $index++
     }
 
-    throw 'Unable to split text into JSON-safe chunks within size limits.'
+    return $chunks
 }
 
 function Invoke-OpenAITts {
     param(
         [string]$Text,
         [string]$Voice,
+        [string]$VoiceName,
+        [string]$Instructions,
         [string]$Model,
         [string]$ApiKey,
         [string]$OutputPath
@@ -568,7 +705,15 @@ function Invoke-OpenAITts {
     $bodyObject = @{
         model = $Model
         input = $safeText
-        voice = $Voice
+    }
+    if ($VoiceName) {
+        $bodyObject.voiceName = $VoiceName
+    }
+    if ($Voice) {
+        $bodyObject.voice = $Voice
+    }
+    if ($Instructions) {
+        $bodyObject.instructions = $Instructions
     }
     $body = $bodyObject | ConvertTo-Json -Depth 4
 
@@ -1460,7 +1605,7 @@ function Invoke-TtsForText {
     param(
         [string]$ChapterName,
         [string]$InputText,
-        [string]$Voice,
+        [string]$SourceName,
         [object]$Settings
     )
 
@@ -1478,6 +1623,13 @@ function Invoke-TtsForText {
     }
 
     Write-Info ("Chapter name set to: {0}" -f $cleanName)
+    $voiceProfileSource = if ($SourceName) { $SourceName } else { $ChapterName }
+    $voiceProfile = Get-VoiceProfile -SourceName $voiceProfileSource
+    if ($voiceProfile.WasDetected) {
+        Write-Info ("Detected POV voice: {0}" -f $voiceProfile.PovName)
+    } else {
+        Write-Info ("No POV detected in name. Defaulting to: {0}" -f $voiceProfile.PovName)
+    }
     Write-Info 'Splitting text into chunks...'
     $chunks = Get-JsonSafeChunks -Text $text -Limit $MaxInputCharacters
     if ($chunks.Count -eq 0) {
@@ -1496,7 +1648,7 @@ function Invoke-TtsForText {
         $index = $i + 1
         $chunkPath = Join-Path $Settings.WorkspaceFolder ("{0}_{1}.mp3" -f $cleanName, $index)
         Write-Info ("Creating audio chunk {0}/{1} -> {2}" -f $index, $chunks.Count, $chunkPath)
-        Invoke-OpenAITts -Text $chunks[$i] -Voice $voice -Model $Settings.Model -ApiKey $apiKey -OutputPath $chunkPath
+        Invoke-OpenAITts -Text $chunks[$i] -Voice $voiceProfile.Voice -VoiceName $voiceProfile.VoiceName -Instructions $voiceProfile.Instructions -Model $Settings.Model -ApiKey $apiKey -OutputPath $chunkPath
         Write-Success ("Chunk created: {0}" -f $chunkPath)
         $outputFiles.Add($chunkPath)
     }
@@ -1551,7 +1703,6 @@ while ($true) {
 
     switch ($selection) {
         '1' {
-            $voice = Select-Voice
             $inputMethod = Select-InputMethod
 
             try {
@@ -1559,9 +1710,10 @@ while ($true) {
                     Write-Info 'Input method selected: file upload'
                     $filePath = Select-InputFile -Settings $settings
                     $chapterName = Get-ChapterNameFromFile -FilePath $filePath
+                    $sourceName = [System.IO.Path]::GetFileNameWithoutExtension($filePath)
                     Write-Info ("Reading input file: {0}" -f $filePath)
                     $inputText = Get-TextFromFile -Path $filePath
-                    Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
+                    Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -SourceName $sourceName -Settings $settings
                 } elseif ($inputMethod -eq 'folder') {
                     Write-Info 'Input method selected: folder'
                     $folderPath = Select-InputFolder -Settings $settings
@@ -1581,11 +1733,12 @@ while ($true) {
                             Write-Warn ("Skipping file with empty chapter name after cleaning: {0}" -f $file.FullName)
                             continue
                         }
+                        $sourceName = [System.IO.Path]::GetFileNameWithoutExtension($file.FullName)
                         Write-Info ("Reading input file: {0}" -f $file.FullName)
                         $inputText = Get-TextFromFile -Path $file.FullName
                         $processingSucceeded = $false
                         try {
-                            Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
+                            Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -SourceName $sourceName -Settings $settings
                             $finalPath = Join-Path $settings.WorkspaceFolder ("{0}.mp3" -f $chapterName)
                             $processingSucceeded = Test-Path $finalPath
                         } catch {
@@ -1608,7 +1761,7 @@ while ($true) {
                         break
                     }
                     $inputText = Read-PastedText
-                    Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -Voice $voice -Settings $settings
+                    Invoke-TtsForText -ChapterName $chapterName -InputText $inputText -SourceName $chapterName -Settings $settings
                 }
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
