@@ -526,8 +526,38 @@ function Normalize-TextForJson {
     $normalized = $normalized.Replace([char]0x201D, '"')
     $normalized = $normalized.Replace([char]0x2018, "'")
     $normalized = $normalized.Replace([char]0x2019, "'")
+    $normalized = $normalized.Replace([char]0x00A0, ' ')
+    $normalized = $normalized.Normalize([System.Text.NormalizationForm]::FormC)
 
     return $normalized
+}
+
+function Remove-InvalidUnicodeChars {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    $builder = New-Object System.Text.StringBuilder
+    $index = 0
+    while ($index -lt $Text.Length) {
+        $current = $Text[$index]
+        if ([char]::IsSurrogate($current)) {
+            if ([char]::IsHighSurrogate($current) -and ($index + 1 -lt $Text.Length) -and [char]::IsLowSurrogate($Text[$index + 1])) {
+                [void]$builder.Append($current)
+                [void]$builder.Append($Text[$index + 1])
+                $index += 2
+                continue
+            }
+            $index++
+            continue
+        }
+        [void]$builder.Append($current)
+        $index++
+    }
+
+    return $builder.ToString()
 }
 
 function Convert-ToJsonSafeText {
@@ -538,7 +568,8 @@ function Convert-ToJsonSafeText {
     }
 
     $normalized = Normalize-TextForJson -Text $Text
-    $normalized = $normalized -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+    $normalized = Remove-InvalidUnicodeChars -Text $normalized
+    $normalized = $normalized -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]', ''
     return $normalized
 }
 
