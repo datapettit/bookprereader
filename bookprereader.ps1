@@ -969,7 +969,7 @@ function Invoke-OpenAIChapterImage {
     )
 
     $systemPrompt = @"
-You are an AI illustrator for a fantasy story. Generate a single image only, no text.
+You are an AI illustrator for a fantasy story. Generate a single image only, no text or markdown.
 Maintain the story vibe, characters, and DnD fantasy tone.
 Use the source images provided in vector storage for character consistency when available.
 Return only the image.
@@ -1038,11 +1038,14 @@ function Invoke-ChapterImageGeneration {
 
     $sourceImages = New-Object System.Collections.Generic.List[string]
     while ($true) {
-        $imagePath = Read-Host 'Enter a source image path (leave blank when done)'
-        $imagePath = Normalize-InputPath -Path $imagePath
+        $imagePath = Read-Host 'Enter a source image path (leave blank or type "no" when done)'
         if ([string]::IsNullOrWhiteSpace($imagePath)) {
             break
         }
+        if ($imagePath.Trim().ToLowerInvariant() -in @('no', 'n', 'done', 'stop')) {
+            break
+        }
+        $imagePath = Normalize-InputPath -Path $imagePath
         if (-not (Test-Path -LiteralPath $imagePath)) {
             Write-Warn ("Image not found: {0}" -f $imagePath)
             continue
@@ -1079,7 +1082,7 @@ function Invoke-ChapterImageGeneration {
             continue
         }
         $cleanName = Sanitize-FileName -Name $chapterName
-        $outputPath = Join-Path $chapterImagesFolder ("{0}.png" -f $cleanName)
+        $outputPath = Join-Path $chapterImagesFolder ("{0}.PNG" -f $cleanName)
         Write-Info ("Generating chapter image: {0}" -f $outputPath)
         $chapterText = Get-TextFromFile -Path $chapterFile.FullName
         Invoke-OpenAIChapterImage -ChapterName $chapterName -ChapterText $chapterText -VectorStoreId $vectorStoreId -ApiKey $apiKey -OutputPath $outputPath
