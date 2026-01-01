@@ -939,6 +939,7 @@ function Invoke-OpenAIFileUpload {
         [string]$ApiKey
     )
 
+    Add-Type -AssemblyName System.Net.Http
     $client = New-Object System.Net.Http.HttpClient
     $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $ApiKey)
     $multipart = New-Object System.Net.Http.MultipartFormDataContent
@@ -1038,6 +1039,7 @@ function Invoke-OpenAIChapterImage {
 You are an AI illustrator for a fantasy story. Generate a single image only, no text or markdown.
 Maintain the story vibe, characters, and DnD fantasy tone.
 Use the source images provided in vector storage for character consistency when available.
+Use file_search on the vector store to reference source images before you generate the final image.
 Return only the image.
 "@
 
@@ -1080,7 +1082,7 @@ $ChapterText
             }
         )
         tools = $tools
-        tool_choice = @{ type = 'image_generation' }
+        tool_choice = 'auto'
     }
 
     $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/responses' -Body $body -ApiKey $ApiKey
@@ -1142,8 +1144,9 @@ function Invoke-ChapterImageGeneration {
 
     $vectorStoreId = $null
     if ($sourceImages.Count -gt 0) {
-        Write-Info 'Creating OpenAI vector store for source images...'
-        $vectorStoreId = New-OpenAIVectorStore -Name 'Chapter Image Sources' -ApiKey $apiKey
+        $vectorStoreName = 'Ori-Chapter-Image-Sources-{0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+        Write-Info ("Creating OpenAI vector store for source images: {0}" -f $vectorStoreName)
+        $vectorStoreId = New-OpenAIVectorStore -Name $vectorStoreName -ApiKey $apiKey
         foreach ($image in $sourceImages) {
             Write-Info ("Uploading source image: {0}" -f $image)
             Add-OpenAIFileToVectorStore -FilePath $image -VectorStoreId $vectorStoreId -ApiKey $apiKey | Out-Null
