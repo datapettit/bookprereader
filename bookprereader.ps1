@@ -890,7 +890,79 @@ function Invoke-OpenAIJsonRequest {
         "Content-Type"  = "application/json"
     }
     $jsonBody = $Body | ConvertTo-Json -Depth 10
-    return Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonBody -ContentType 'application/json'
+    try {
+        return Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonBody -ContentType 'application/json'
+    } catch {
+        $responseBody = $null
+        $statusCode = 0
+        $reasonPhrase = $null
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+            $reasonPhrase = $_.Exception.Response.StatusDescription
+            try {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $responseBody = $reader.ReadToEnd()
+                    $reader.Close()
+                }
+            } catch {
+                $responseBody = $null
+            }
+        }
+        Write-OpenAIHttpError -Context $Uri -StatusCode $statusCode -ReasonPhrase $reasonPhrase -ResponseBody $responseBody
+        throw
+    }
+}
+
+function Write-OpenAIHttpError {
+    param(
+        [string]$Context,
+        [int]$StatusCode,
+        [string]$ReasonPhrase,
+        [string]$ResponseBody
+    )
+
+    Write-ErrorMessage ("OpenAI request failed during {0}." -f $Context)
+    if ($StatusCode) {
+        Write-ErrorMessage ("Status: {0} ({1})" -f $StatusCode, $ReasonPhrase)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ResponseBody)) {
+        Write-ErrorMessage ('Response body:')
+        Write-ErrorMessage $ResponseBody
+    }
+}
+
+function Invoke-OpenAIFileUpload {
+    param(
+        [string]$FilePath,
+        [string]$ApiKey
+    )
+
+    $client = New-Object System.Net.Http.HttpClient
+    $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $ApiKey)
+    $multipart = New-Object System.Net.Http.MultipartFormDataContent
+    $fileStream = $null
+    try {
+        $multipart.Add((New-Object System.Net.Http.StringContent('assistants')), 'purpose')
+        $fileStream = [System.IO.File]::OpenRead($FilePath)
+        $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
+        $fileContent.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
+        $multipart.Add($fileContent, 'file', [System.IO.Path]::GetFileName($FilePath))
+
+        $response = $client.PostAsync('https://api.openai.com/v1/files', $multipart).Result
+        $body = $response.Content.ReadAsStringAsync().Result
+        if (-not $response.IsSuccessStatusCode) {
+            $statusCode = [int]$response.StatusCode
+            Write-OpenAIHttpError -Context 'file upload' -StatusCode $statusCode -ReasonPhrase $response.ReasonPhrase -ResponseBody $body
+            throw ("OpenAI file upload failed with status {0}." -f $statusCode)
+        }
+        return $body | ConvertFrom-Json
+    } finally {
+        if ($fileStream) { $fileStream.Dispose() }
+        $multipart.Dispose()
+        $client.Dispose()
+    }
 }
 
 function New-OpenAIVectorStore {
@@ -913,14 +985,8 @@ function Add-OpenAIFileToVectorStore {
         [string]$ApiKey
     )
 
-    $headers = @{
-        "Authorization" = "Bearer $ApiKey"
-    }
     $fileItem = Get-Item -LiteralPath $FilePath
-    $fileResponse = Invoke-RestMethod -Method Post -Uri 'https://api.openai.com/v1/files' -Headers $headers -Form @{
-        purpose = 'assistants'
-        file    = $fileItem
-    }
+    $fileResponse = Invoke-OpenAIFileUpload -FilePath $fileItem.FullName -ApiKey $ApiKey
     $attachBody = @{
         file_id = $fileResponse.id
     }
@@ -1037,8 +1103,9 @@ function Invoke-ChapterImageGeneration {
     }
 
     $sourceImages = New-Object System.Collections.Generic.List[string]
+    $imageExtensions = @('.png', '.jpg', '.jpeg')
     while ($true) {
-        $imagePath = Read-Host 'Enter a source image path (leave blank or type "no" when done)'
+        $imagePath = Read-Host 'Enter a source image path or folder (leave blank or type "no" when done)'
         if ([string]::IsNullOrWhiteSpace($imagePath)) {
             break
         }
@@ -1052,7 +1119,21 @@ function Invoke-ChapterImageGeneration {
         }
         $item = Get-Item -LiteralPath $imagePath
         if ($item.PSIsContainer) {
-            Write-Warn ("Path is a folder, not an image: {0}" -f $imagePath)
+            $foundImages = Get-ChildItem -LiteralPath $item.FullName -File |
+                Where-Object { $imageExtensions -contains $_.Extension.ToLowerInvariant() } |
+                Sort-Object FullName
+            if (-not $foundImages -or $foundImages.Count -eq 0) {
+                Write-Warn ("No supported images found in folder: {0}" -f $item.FullName)
+                continue
+            }
+            foreach ($image in $foundImages) {
+                $sourceImages.Add($image.FullName)
+            }
+            Write-Success ("Added {0} images from folder: {1}" -f $foundImages.Count, $item.FullName)
+            continue
+        }
+        if (-not ($imageExtensions -contains $item.Extension.ToLowerInvariant())) {
+            Write-Warn ("Unsupported image type: {0}" -f $item.FullName)
             continue
         }
         $sourceImages.Add($item.FullName)
