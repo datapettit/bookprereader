@@ -878,6 +878,215 @@ function Invoke-OpenAITts {
     }
 }
 
+function Invoke-OpenAIJsonRequest {
+    param(
+        [string]$Uri,
+        [object]$Body,
+        [string]$ApiKey
+    )
+
+    $headers = @{
+        "Authorization" = "Bearer $ApiKey"
+        "Content-Type"  = "application/json"
+    }
+    $jsonBody = $Body | ConvertTo-Json -Depth 10
+    return Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonBody -ContentType 'application/json'
+}
+
+function New-OpenAIVectorStore {
+    param(
+        [string]$Name,
+        [string]$ApiKey
+    )
+
+    $body = @{
+        name = $Name
+    }
+    $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/vector_stores' -Body $body -ApiKey $ApiKey
+    return $response.id
+}
+
+function Add-OpenAIFileToVectorStore {
+    param(
+        [string]$FilePath,
+        [string]$VectorStoreId,
+        [string]$ApiKey
+    )
+
+    $headers = @{
+        "Authorization" = "Bearer $ApiKey"
+    }
+    $fileItem = Get-Item -LiteralPath $FilePath
+    $fileResponse = Invoke-RestMethod -Method Post -Uri 'https://api.openai.com/v1/files' -Headers $headers -Form @{
+        purpose = 'assistants'
+        file    = $fileItem
+    }
+    $attachBody = @{
+        file_id = $fileResponse.id
+    }
+    Invoke-OpenAIJsonRequest -Uri ("https://api.openai.com/v1/vector_stores/{0}/files" -f $VectorStoreId) -Body $attachBody -ApiKey $ApiKey | Out-Null
+    return $fileResponse.id
+}
+
+function Get-OpenAIImageBytesFromResponse {
+    param([object]$Response)
+
+    $base64 = $null
+    foreach ($output in $Response.output) {
+        if ($output.type -eq 'image_generation') {
+            if ($output.image_base64) { $base64 = $output.image_base64; break }
+            if ($output.image_b64) { $base64 = $output.image_b64; break }
+            if ($output.b64_json) { $base64 = $output.b64_json; break }
+        }
+        if ($output.type -eq 'message' -and $output.content) {
+            foreach ($content in $output.content) {
+                if ($content.type -eq 'output_image') {
+                    if ($content.image_base64) { $base64 = $content.image_base64; break }
+                    if ($content.image_b64) { $base64 = $content.image_b64; break }
+                    if ($content.b64_json) { $base64 = $content.b64_json; break }
+                }
+            }
+        }
+        if ($base64) {
+            break
+        }
+    }
+
+    if (-not $base64) {
+        throw 'OpenAI response did not include image data.'
+    }
+
+    return [System.Convert]::FromBase64String($base64)
+}
+
+function Invoke-OpenAIChapterImage {
+    param(
+        [string]$ChapterName,
+        [string]$ChapterText,
+        [string]$VectorStoreId,
+        [string]$ApiKey,
+        [string]$OutputPath
+    )
+
+    $systemPrompt = @"
+You are an AI illustrator for a fantasy story. Generate a single image only, no text.
+Maintain the story vibe, characters, and DnD fantasy tone.
+Use the source images provided in vector storage for character consistency when available.
+Return only the image.
+"@
+
+    $userPrompt = @"
+Chapter: $ChapterName
+
+Story text:
+$ChapterText
+"@
+
+    $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
+    $userPrompt = Convert-ToJsonSafeText -Text $userPrompt
+
+    $tools = @(
+        @{ type = 'image_generation' }
+    )
+    if ($VectorStoreId) {
+        $tools = @(
+            @{ type = 'file_search'; vector_store_ids = @($VectorStoreId) },
+            @{ type = 'image_generation' }
+        )
+    }
+
+    $body = @{
+        model = 'gpt-4o-mini'
+        input = @(
+            @{
+                role = 'system'
+                content = @(@{
+                    type = 'input_text'
+                    text = $systemPrompt
+                })
+            },
+            @{
+                role = 'user'
+                content = @(@{
+                    type = 'input_text'
+                    text = $userPrompt
+                })
+            }
+        )
+        tools = $tools
+        tool_choice = @{ type = 'image_generation' }
+    }
+
+    $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/responses' -Body $body -ApiKey $ApiKey
+    $imageBytes = Get-OpenAIImageBytesFromResponse -Response $response
+    [System.IO.File]::WriteAllBytes($OutputPath, $imageBytes)
+}
+
+function Invoke-ChapterImageGeneration {
+    param([object]$Settings)
+
+    $Settings.WorkspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    $apiKey = Get-ApiKey -Settings $Settings
+    $chapterFolder = Select-InputFolder -Settings $Settings
+    Write-Info ("Scanning chapter folder: {0}" -f $chapterFolder)
+    $chapterFiles = Get-InputFilesFromFolder -FolderPath $chapterFolder
+    if (-not $chapterFiles -or $chapterFiles.Count -eq 0) {
+        Write-Warn 'No chapter files found in the selected folder.'
+        return
+    }
+
+    $sourceImages = New-Object System.Collections.Generic.List[string]
+    while ($true) {
+        $imagePath = Read-Host 'Enter a source image path (leave blank when done)'
+        $imagePath = Normalize-InputPath -Path $imagePath
+        if ([string]::IsNullOrWhiteSpace($imagePath)) {
+            break
+        }
+        if (-not (Test-Path -LiteralPath $imagePath)) {
+            Write-Warn ("Image not found: {0}" -f $imagePath)
+            continue
+        }
+        $item = Get-Item -LiteralPath $imagePath
+        if ($item.PSIsContainer) {
+            Write-Warn ("Path is a folder, not an image: {0}" -f $imagePath)
+            continue
+        }
+        $sourceImages.Add($item.FullName)
+        Write-Success ("Added source image: {0}" -f $item.FullName)
+    }
+
+    $vectorStoreId = $null
+    if ($sourceImages.Count -gt 0) {
+        Write-Info 'Creating OpenAI vector store for source images...'
+        $vectorStoreId = New-OpenAIVectorStore -Name 'Chapter Image Sources' -ApiKey $apiKey
+        foreach ($image in $sourceImages) {
+            Write-Info ("Uploading source image: {0}" -f $image)
+            Add-OpenAIFileToVectorStore -FilePath $image -VectorStoreId $vectorStoreId -ApiKey $apiKey | Out-Null
+        }
+        Write-Success ("Vector store ready: {0}" -f $vectorStoreId)
+    } else {
+        Write-Warn 'No source images provided. Proceeding without character references.'
+    }
+
+    $chapterImagesFolder = Join-Path $Settings.WorkspaceFolder 'ChapterImages'
+    Ensure-WorkspaceFolder -Path $chapterImagesFolder
+
+    foreach ($chapterFile in $chapterFiles) {
+        $chapterName = Get-ChapterNameFromFile -FilePath $chapterFile.FullName
+        if (-not $chapterName) {
+            Write-Warn ("Skipping file with empty chapter name after cleaning: {0}" -f $chapterFile.FullName)
+            continue
+        }
+        $cleanName = Sanitize-FileName -Name $chapterName
+        $outputPath = Join-Path $chapterImagesFolder ("{0}.png" -f $cleanName)
+        Write-Info ("Generating chapter image: {0}" -f $outputPath)
+        $chapterText = Get-TextFromFile -Path $chapterFile.FullName
+        Invoke-OpenAIChapterImage -ChapterName $chapterName -ChapterText $chapterText -VectorStoreId $vectorStoreId -ApiKey $apiKey -OutputPath $outputPath
+        Write-Success ("Saved chapter image: {0}" -f $outputPath)
+    }
+}
+
 function Ensure-Ffmpeg {
     $existing = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if ($existing) {
@@ -1733,6 +1942,7 @@ while ($true) {
     Write-Info ("Working directory: {0}" -f $settings.WorkspaceFolder)
     Write-Host '1) Create audio'
     Write-Host '2) Split book into chapters/scenes'
+    Write-Host '3) Generate chapter imagery'
     Write-Host '9) Settings'
     Write-Host '0) Exit'
     $selection = (Read-Host 'Choose an option').Trim()
@@ -1808,6 +2018,14 @@ while ($true) {
             try {
                 $filePath = Select-InputFile -Settings $settings
                 Split-BookIntoScenes -FilePath $filePath -Settings $settings
+            } catch {
+                Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
+            }
+            Read-Host 'Press Enter to return to the main menu'
+        }
+        '3' {
+            try {
+                Invoke-ChapterImageGeneration -Settings $settings
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
             }
