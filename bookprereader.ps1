@@ -528,6 +528,14 @@ function Normalize-TextForJson {
     $normalized = $normalized.Replace([char]0x2018, "'")
     $normalized = $normalized.Replace([char]0x2019, "'")
     $normalized = $normalized.Replace([char]0x00A0, ' ')
+    $normalized = $normalized.Replace([char]0x2028, "`n")
+    $normalized = $normalized.Replace([char]0x2029, "`n")
+    $normalized = $normalized.Replace([char]0x00AD, '')
+    $normalized = $normalized.Replace([char]0xFEFF, '')
+    $normalized = $normalized.Replace([char]0x200B, '')
+    $normalized = $normalized.Replace([char]0x200C, '')
+    $normalized = $normalized.Replace([char]0x200D, '')
+    $normalized = $normalized.Replace([char]0x2060, '')
     $normalized = $normalized.Normalize([System.Text.NormalizationForm]::FormC)
 
     return $normalized
@@ -571,6 +579,7 @@ function Convert-ToJsonSafeText {
     $normalized = Normalize-TextForJson -Text $Text
     $normalized = Remove-InvalidUnicodeChars -Text $normalized
     $normalized = $normalized -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]', ''
+    $normalized = $normalized -replace '\p{Cf}', ''
     return $normalized
 }
 
@@ -979,8 +988,10 @@ function Write-OpenAIHttpError {
     if ($ResponseHeaders) {
         Write-ErrorMessage ("Response headers: {0}" -f ($ResponseHeaders | ConvertTo-Json -Depth 6))
     }
-    if (-not [string]::IsNullOrWhiteSpace($ResponseBody)) {
-        Write-ErrorMessage ('Response body:')
+    if ([string]::IsNullOrWhiteSpace($ResponseBody)) {
+        Write-ErrorMessage 'Response body: <empty>'
+    } else {
+        Write-ErrorMessage 'Response body:'
         Write-ErrorMessage $ResponseBody
     }
 }
