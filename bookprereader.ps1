@@ -3,6 +3,8 @@ cls
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SettingsPath = Join-Path $ScriptRoot 'settings.json'
 $MaxInputCharacters = 3900
+$ImagePromptMaxCharacters = 3500
+$ImagePromptReductionAttempts = 3
 $SupportedModels = @('gpt-4o-mini-tts')
 $SupportedVoices = @('alloy', 'ash', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
 $DefaultApiKey = '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'
@@ -603,6 +605,87 @@ function Get-JsonSafeLength {
     return (Get-JsonEncodedLength -Text (Convert-ToJsonSafeText -Text $Text))
 }
 
+function Trim-TextToJsonLength {
+    param(
+        [string]$Text,
+        [int]$MaxCharacters
+    )
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    $trimmed = $Text
+    while ($trimmed.Length -gt 0 -and (Get-JsonSafeLength -Text $trimmed) -gt $MaxCharacters) {
+        $step = [Math]::Min(100, $trimmed.Length)
+        $trimmed = $trimmed.Substring(0, $trimmed.Length - $step)
+    }
+    while ($trimmed.Length -gt 0 -and (Get-JsonSafeLength -Text $trimmed) -gt $MaxCharacters) {
+        $trimmed = $trimmed.Substring(0, $trimmed.Length - 1)
+    }
+    return $trimmed
+}
+
+function Invoke-OpenAIImagePromptReduction {
+    param(
+        [string]$Prompt,
+        [string]$ApiKey,
+        [int]$MaxCharacters,
+        [int]$Attempt
+    )
+
+    $safePrompt = Convert-ToJsonSafeText -Text $Prompt
+    $currentLength = Get-JsonSafeLength -Text $safePrompt
+    Write-Info ("Reducing image prompt length (attempt {0}): {1} -> {2} chars." -f $Attempt, $currentLength, $MaxCharacters)
+
+    $body = @{
+        model = 'gpt-4o-mini'
+        messages = @(
+            @{ role = 'system'; content = 'You shorten prompts for image generation. Return only the revised prompt text without quotes or markdown.' }
+            @{ role = 'user'; content = ("Reduce the prompt to {0} characters or fewer while keeping essential visual details, tone, and style. Return only the prompt text.`n`nPrompt:`n{1}" -f $MaxCharacters, $safePrompt) }
+        )
+        temperature = 0.2
+        max_tokens = 700
+    }
+
+    $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/chat/completions' -Body $body -ApiKey $ApiKey
+    $reducedPrompt = $response.choices[0].message.content
+    if ([string]::IsNullOrWhiteSpace($reducedPrompt)) {
+        throw 'OpenAI prompt reduction returned empty content.'
+    }
+
+    $reducedPrompt = $reducedPrompt.Trim()
+    $newLength = Get-JsonSafeLength -Text $reducedPrompt
+    Write-Info ("Prompt reduction attempt {0} result length: {1} chars." -f $Attempt, $newLength)
+    return $reducedPrompt
+}
+
+function Ensure-ImagePromptWithinLimit {
+    param(
+        [string]$Prompt,
+        [string]$ApiKey,
+        [int]$MaxCharacters,
+        [int]$MaxAttempts
+    )
+
+    $currentPrompt = Convert-ToJsonSafeText -Text $Prompt
+    $currentLength = Get-JsonSafeLength -Text $currentPrompt
+    if ($currentLength -le $MaxCharacters) {
+        return $currentPrompt
+    }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $currentPrompt = Invoke-OpenAIImagePromptReduction -Prompt $currentPrompt -ApiKey $ApiKey -MaxCharacters $MaxCharacters -Attempt $attempt
+        $currentLength = Get-JsonSafeLength -Text $currentPrompt
+        if ($currentLength -le $MaxCharacters) {
+            return $currentPrompt
+        }
+    }
+
+    Write-Warn ("Prompt remains over the limit after {0} attempts. Trimming to {1} characters." -f $MaxAttempts, $MaxCharacters)
+    return Trim-TextToJsonLength -Text $currentPrompt -MaxCharacters $MaxCharacters
+}
+
 function Join-ParagraphRange {
     param(
         [string[]]$Paragraphs,
@@ -944,6 +1027,8 @@ function Invoke-OpenAIImageGeneration {
     }
 
     $safePrompt = Convert-ToJsonSafeText -Text $Prompt
+    $promptLength = Get-JsonSafeLength -Text $safePrompt
+    Write-Info ("Calling OpenAI image generation. Prompt length: {0} chars." -f $promptLength)
     $body = @{
         model = 'gpt-image-1'
         prompt = $safePrompt
@@ -1027,6 +1112,7 @@ $ImageStyleGuidance
 $userPrompt
 "@
 
+    $finalPrompt = Ensure-ImagePromptWithinLimit -Prompt $finalPrompt -ApiKey $ApiKey -MaxCharacters $ImagePromptMaxCharacters -MaxAttempts $ImagePromptReductionAttempts
     Invoke-OpenAIImageGeneration -Prompt $finalPrompt -ApiKey $ApiKey -OutputPath $OutputPath
 }
 
@@ -1356,6 +1442,7 @@ $ImageStyleGuidance
 $userPrompt
 "@
 
+    $finalPrompt = Ensure-ImagePromptWithinLimit -Prompt $finalPrompt -ApiKey $ApiKey -MaxCharacters $ImagePromptMaxCharacters -MaxAttempts $ImagePromptReductionAttempts
     Invoke-OpenAIImageGeneration -Prompt $finalPrompt -ApiKey $ApiKey -OutputPath $OutputPath
 }
 
