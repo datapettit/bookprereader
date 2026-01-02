@@ -986,6 +986,10 @@ function Invoke-OpenAIJsonRequest {
     try {
         return Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonBody -ContentType 'application/json'
     } catch {
+        Write-Warn $_.Exception
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            Write-Warn $_.ErrorDetails.Message
+        }
         $responseBody = $null
         $statusCode = 0
         $reasonPhrase = $null
@@ -1033,7 +1037,6 @@ function Invoke-OpenAIImageGeneration {
         model = 'gpt-image-1'
         prompt = $safePrompt
         size = '1024x1024'
-        response_format = 'b64_json'
     }
 
     $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/images/generations' -Body $body -ApiKey $ApiKey
