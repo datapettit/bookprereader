@@ -897,9 +897,15 @@ function Invoke-OpenAIJsonRequest {
         $responseBody = $null
         $statusCode = 0
         $reasonPhrase = $null
+        $responseHeaders = $null
+        $requestId = $null
         if ($_.Exception.Response) {
             $statusCode = [int]$_.Exception.Response.StatusCode
             $reasonPhrase = $_.Exception.Response.StatusDescription
+            $responseHeaders = $_.Exception.Response.Headers
+            if ($responseHeaders -and $responseHeaders['x-request-id']) {
+                $requestId = $responseHeaders['x-request-id']
+            }
             try {
                 $stream = $_.Exception.Response.GetResponseStream()
                 if ($stream) {
@@ -911,7 +917,8 @@ function Invoke-OpenAIJsonRequest {
                 $responseBody = $null
             }
         }
-        Write-OpenAIHttpError -Context $Uri -StatusCode $statusCode -ReasonPhrase $reasonPhrase -ResponseBody $responseBody
+        $redactedHeaders = Get-RedactedHeadersForLog -Headers $headers
+        Write-OpenAIHttpError -Context $Uri -StatusCode $statusCode -ReasonPhrase $reasonPhrase -ResponseBody $responseBody -RequestHeaders $redactedHeaders -RequestBody $jsonBody -ResponseHeaders $responseHeaders -RequestId $requestId
         throw
     }
 }
@@ -927,9 +934,10 @@ function Invoke-OpenAIImageGeneration {
         throw 'Image prompt cannot be empty.'
     }
 
+    $safePrompt = Convert-ToJsonSafeText -Text $Prompt
     $body = @{
         model = 'gpt-image-1'
-        prompt = $Prompt
+        prompt = $safePrompt
         size = '1024x1024'
         response_format = 'b64_json'
     }
@@ -948,12 +956,28 @@ function Write-OpenAIHttpError {
         [string]$Context,
         [int]$StatusCode,
         [string]$ReasonPhrase,
-        [string]$ResponseBody
+        [string]$ResponseBody,
+        [hashtable]$RequestHeaders,
+        [string]$RequestBody,
+        [object]$ResponseHeaders,
+        [string]$RequestId
     )
 
     Write-ErrorMessage ("OpenAI request failed during {0}." -f $Context)
+    if ($RequestHeaders) {
+        Write-ErrorMessage ("Request headers (redacted): {0}" -f ($RequestHeaders | ConvertTo-Json -Depth 6))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestBody)) {
+        Write-ErrorMessage ("Request body: {0}" -f $RequestBody)
+    }
     if ($StatusCode) {
         Write-ErrorMessage ("Status: {0} ({1})" -f $StatusCode, $ReasonPhrase)
+    }
+    if ($RequestId) {
+        Write-ErrorMessage ("OpenAI request id: {0}" -f $RequestId)
+    }
+    if ($ResponseHeaders) {
+        Write-ErrorMessage ("Response headers: {0}" -f ($ResponseHeaders | ConvertTo-Json -Depth 6))
     }
     if (-not [string]::IsNullOrWhiteSpace($ResponseBody)) {
         Write-ErrorMessage ('Response body:')
