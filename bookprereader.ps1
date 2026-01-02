@@ -7,6 +7,7 @@ $SupportedModels = @('gpt-4o-mini-tts')
 $SupportedVoices = @('alloy', 'ash', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
 $DefaultApiKey = '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'
 $EnableClearHost = $false
+$ImageStyleGuidance = 'DND tavern adventure atmosphere. Cinematic, realistic HD painted artwork. High quality, detailed, expressive, dramatic lighting, and rich textures. Maintain consistent style across all images.'
 $IsWindows = $false
 if ($env:OS -eq 'Windows_NT') {
     $IsWindows = $true
@@ -915,6 +916,33 @@ function Invoke-OpenAIJsonRequest {
     }
 }
 
+function Invoke-OpenAIImageGeneration {
+    param(
+        [string]$Prompt,
+        [string]$ApiKey,
+        [string]$OutputPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Prompt)) {
+        throw 'Image prompt cannot be empty.'
+    }
+
+    $body = @{
+        model = 'gpt-image-1'
+        prompt = $Prompt
+        size = '1024x1024'
+        response_format = 'b64_json'
+    }
+
+    $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/images/generations' -Body $body -ApiKey $ApiKey
+    if (-not $response.data -or -not $response.data[0] -or -not $response.data[0].b64_json) {
+        throw 'OpenAI image generation response did not include image data.'
+    }
+
+    $imageBytes = [System.Convert]::FromBase64String($response.data[0].b64_json)
+    [System.IO.File]::WriteAllBytes($OutputPath, $imageBytes)
+}
+
 function Write-OpenAIHttpError {
     param(
         [string]$Context,
@@ -933,104 +961,10 @@ function Write-OpenAIHttpError {
     }
 }
 
-function Invoke-OpenAIFileUpload {
-    param(
-        [string]$FilePath,
-        [string]$ApiKey
-    )
-
-    Add-Type -AssemblyName System.Net.Http
-    $client = New-Object System.Net.Http.HttpClient
-    $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $ApiKey)
-    $multipart = New-Object System.Net.Http.MultipartFormDataContent
-    $fileStream = $null
-    try {
-        $multipart.Add((New-Object System.Net.Http.StringContent('assistants')), 'purpose')
-        $fileStream = [System.IO.File]::OpenRead($FilePath)
-        $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
-        $fileContent.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
-        $multipart.Add($fileContent, 'file', [System.IO.Path]::GetFileName($FilePath))
-
-        $response = $client.PostAsync('https://api.openai.com/v1/files', $multipart).Result
-        $body = $response.Content.ReadAsStringAsync().Result
-        if (-not $response.IsSuccessStatusCode) {
-            $statusCode = [int]$response.StatusCode
-            Write-OpenAIHttpError -Context 'file upload' -StatusCode $statusCode -ReasonPhrase $response.ReasonPhrase -ResponseBody $body
-            throw ("OpenAI file upload failed with status {0}." -f $statusCode)
-        }
-        return $body | ConvertFrom-Json
-    } finally {
-        if ($fileStream) { $fileStream.Dispose() }
-        $multipart.Dispose()
-        $client.Dispose()
-    }
-}
-
-function New-OpenAIVectorStore {
-    param(
-        [string]$Name,
-        [string]$ApiKey
-    )
-
-    $body = @{
-        name = $Name
-    }
-    $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/vector_stores' -Body $body -ApiKey $ApiKey
-    return $response.id
-}
-
-function Add-OpenAIFileToVectorStore {
-    param(
-        [string]$FilePath,
-        [string]$VectorStoreId,
-        [string]$ApiKey
-    )
-
-    $fileItem = Get-Item -LiteralPath $FilePath
-    $fileResponse = Invoke-OpenAIFileUpload -FilePath $fileItem.FullName -ApiKey $ApiKey
-    $attachBody = @{
-        file_id = $fileResponse.id
-    }
-    Invoke-OpenAIJsonRequest -Uri ("https://api.openai.com/v1/vector_stores/{0}/files" -f $VectorStoreId) -Body $attachBody -ApiKey $ApiKey | Out-Null
-    return $fileResponse.id
-}
-
-function Get-OpenAIImageBytesFromResponse {
-    param([object]$Response)
-
-    $base64 = $null
-    foreach ($output in $Response.output) {
-        if ($output.type -eq 'image_generation') {
-            if ($output.image_base64) { $base64 = $output.image_base64; break }
-            if ($output.image_b64) { $base64 = $output.image_b64; break }
-            if ($output.b64_json) { $base64 = $output.b64_json; break }
-        }
-        if ($output.type -eq 'message' -and $output.content) {
-            foreach ($content in $output.content) {
-                if ($content.type -eq 'output_image') {
-                    if ($content.image_base64) { $base64 = $content.image_base64; break }
-                    if ($content.image_b64) { $base64 = $content.image_b64; break }
-                    if ($content.b64_json) { $base64 = $content.b64_json; break }
-                }
-            }
-        }
-        if ($base64) {
-            break
-        }
-    }
-
-    if (-not $base64) {
-        throw 'OpenAI response did not include image data.'
-    }
-
-    return [System.Convert]::FromBase64String($base64)
-}
-
 function Invoke-OpenAIChapterImage {
     param(
         [string]$ChapterName,
         [string]$ChapterText,
-        [string]$VectorStoreId,
         [string]$ApiKey,
         [string]$OutputPath
     )
@@ -1038,8 +972,6 @@ function Invoke-OpenAIChapterImage {
     $systemPrompt = @"
 You are an AI illustrator for a fantasy story. Generate a single image only, no text or markdown.
 Maintain the story vibe, characters, and DnD fantasy tone.
-Use the source images provided in vector storage for character consistency when available.
-Use file_search on the vector store to reference source images before you generate the final image.
 Return only the image.
 "@
 
@@ -1052,42 +984,15 @@ $ChapterText
 
     $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
     $userPrompt = Convert-ToJsonSafeText -Text $userPrompt
+    $finalPrompt = @"
+$systemPrompt
 
-    $tools = @(
-        @{ type = 'image_generation' }
-    )
-    if ($VectorStoreId) {
-        $tools = @(
-            @{ type = 'file_search'; vector_store_ids = @($VectorStoreId) },
-            @{ type = 'image_generation' }
-        )
-    }
+$ImageStyleGuidance
 
-    $body = @{
-        model = 'gpt-4o-mini'
-        input = @(
-            @{
-                role = 'system'
-                content = @(@{
-                    type = 'input_text'
-                    text = $systemPrompt
-                })
-            },
-            @{
-                role = 'user'
-                content = @(@{
-                    type = 'input_text'
-                    text = $userPrompt
-                })
-            }
-        )
-        tools = $tools
-        tool_choice = 'auto'
-    }
+$userPrompt
+"@
 
-    $response = Invoke-OpenAIJsonRequest -Uri 'https://api.openai.com/v1/responses' -Body $body -ApiKey $ApiKey
-    $imageBytes = Get-OpenAIImageBytesFromResponse -Response $response
-    [System.IO.File]::WriteAllBytes($OutputPath, $imageBytes)
+    Invoke-OpenAIImageGeneration -Prompt $finalPrompt -ApiKey $ApiKey -OutputPath $OutputPath
 }
 
 function Invoke-ChapterImageGeneration {
@@ -1104,58 +1009,6 @@ function Invoke-ChapterImageGeneration {
         return
     }
 
-    $sourceImages = New-Object System.Collections.Generic.List[string]
-    $imageExtensions = @('.png', '.jpg', '.jpeg')
-    while ($true) {
-        $imagePath = Read-Host 'Enter a source image path or folder (leave blank or type "no" when done)'
-        if ([string]::IsNullOrWhiteSpace($imagePath)) {
-            break
-        }
-        if ($imagePath.Trim().ToLowerInvariant() -in @('no', 'n', 'done', 'stop')) {
-            break
-        }
-        $imagePath = Normalize-InputPath -Path $imagePath
-        if (-not (Test-Path -LiteralPath $imagePath)) {
-            Write-Warn ("Image not found: {0}" -f $imagePath)
-            continue
-        }
-        $item = Get-Item -LiteralPath $imagePath
-        if ($item.PSIsContainer) {
-            $foundImages = Get-ChildItem -LiteralPath $item.FullName -File |
-                Where-Object { $imageExtensions -contains $_.Extension.ToLowerInvariant() } |
-                Sort-Object FullName
-            if (-not $foundImages -or $foundImages.Count -eq 0) {
-                Write-Warn ("No supported images found in folder: {0}" -f $item.FullName)
-                continue
-            }
-            foreach ($image in $foundImages) {
-                $sourceImages.Add($image.FullName)
-            }
-            Write-Success ("Added {0} images from folder: {1}" -f $foundImages.Count, $item.FullName)
-            continue
-        }
-        if (-not ($imageExtensions -contains $item.Extension.ToLowerInvariant())) {
-            Write-Warn ("Unsupported image type: {0}" -f $item.FullName)
-            continue
-        }
-        $sourceImages.Add($item.FullName)
-        Write-Success ("Added source image: {0}" -f $item.FullName)
-    }
-
-    $vectorStoreId = $null
-    if ($sourceImages.Count -gt 0) {
-        $vectorStoreName = 'Ori-Chapter-Image-Sources-{0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
-        Write-Info ("Creating OpenAI vector store for source images: {0}" -f $vectorStoreName)
-        $vectorStoreId = New-OpenAIVectorStore -Name $vectorStoreName -ApiKey $apiKey
-        foreach ($image in $sourceImages) {
-            Write-Info ("Uploading source image: {0}" -f $image)
-            Add-OpenAIFileToVectorStore -FilePath $image -VectorStoreId $vectorStoreId -ApiKey $apiKey | Out-Null
-        }
-        Write-Success ("Vector store ready: {0}" -f $vectorStoreId)
-    } else {
-        Write-Warn 'No source images provided. Proceeding without character references.'
-    }
-
     $chapterImagesFolder = Join-Path $Settings.WorkspaceFolder 'ChapterImages'
     Ensure-WorkspaceFolder -Path $chapterImagesFolder
 
@@ -1169,8 +1022,435 @@ function Invoke-ChapterImageGeneration {
         $outputPath = Join-Path $chapterImagesFolder ("{0}.PNG" -f $cleanName)
         Write-Info ("Generating chapter image: {0}" -f $outputPath)
         $chapterText = Get-TextFromFile -Path $chapterFile.FullName
-        Invoke-OpenAIChapterImage -ChapterName $chapterName -ChapterText $chapterText -VectorStoreId $vectorStoreId -ApiKey $apiKey -OutputPath $outputPath
+        Invoke-OpenAIChapterImage -ChapterName $chapterName -ChapterText $chapterText -ApiKey $apiKey -OutputPath $outputPath
         Write-Success ("Saved chapter image: {0}" -f $outputPath)
+    }
+}
+
+function Get-SceneJsonTemplate {
+    return @"
+{
+  "World": {
+    "Name": "Uppings",
+    "Tone": "Industrial fantasy with intimate, dangerous warmth",
+    "VisualStyle": "Shadow Style; three-quarters overhead; 80s DnD realism; cinematic chiaroscuro",
+    "StoryNodes": [
+      {
+        "id": "uppings_city",
+        "type": "city",
+        "name": "Uppings",
+        "ownership": "None",
+        "hierarchy": {
+          "parent": null,
+          "region": "Primary setting"
+        },
+        "narrativeRole": "The living machine that grinds and shelters the story",
+        "visualIdentity": {
+          "keyElements": ["brick rooftops", "chimneys", "steam vents", "lantern-lit streets"],
+          "lighting": "Warm industrial glow cut by deep slate shadows",
+          "materials": "Brick, iron, soot, brass",
+          "colorPalette": "Ember orange, tarnished brass, coal black, slate blue"
+        },
+        "emotionalSignature": {
+          "primaryMood": "Relentless momentum",
+          "secondaryNotes": ["opportunity", "surveillance", "pressure"],
+          "whatItPromises": "Anonymity and movement",
+          "whatItThreatens": "Being swallowed whole"
+        },
+        "usage": {
+          "storyImportance": "major",
+          "typicalScenes": ["travel", "chases", "quiet dread", "crowded conversations"]
+        },
+        "aiStoryboardPrompt": "Storyboard illustration in Shadow Style, three-quarters overhead view. A dense industrial fantasy city of brick roofs and chimneys venting steam, lantern light pooling in narrow streets. Cinematic chiaroscuro with warm ember highlights and cold slate shadows. The city should feel alive, crowded, and quietly predatory."
+      },
+      {
+        "id": "forge_streets",
+        "type": "district",
+        "name": "Forge Streets",
+        "ownership": "Public / Guild-adjacent",
+        "hierarchy": {
+          "parent": "Uppings",
+          "region": "Industrial core"
+        },
+        "narrativeRole": "Commerce, cover, and chaos",
+        "visualIdentity": {
+          "keyElements": ["open forges", "street stalls", "carts", "hammer sparks"],
+          "lighting": "Firelight and reflected glow",
+          "materials": "Iron, stone, ash, leather",
+          "colorPalette": "Hot orange, rust red, smoke gray"
+        },
+        "emotionalSignature": {
+          "primaryMood": "Restless energy",
+          "secondaryNotes": ["noise", "heat", "distraction"],
+          "whatItPromises": "Cover in crowds",
+          "whatItThreatens": "Mistakes in motion"
+        },
+        "usage": {
+          "storyImportance": "recurring",
+          "typicalScenes": ["meetings", "tailing", "misdirection"]
+        },
+        "aiStoryboardPrompt": "Three-quarters overhead storyboard in Shadow Style. A busy industrial street lined with open forges, glowing anvils, and crowded stalls. Heat shimmer in the air, sparks and soot catching lantern light. Strong chiaroscuro with deep shadows between buildings."
+      },
+      {
+        "id": "citrus_emporium",
+        "type": "interior",
+        "name": "The Citrus Emporium",
+        "ownership": "Kaisa Sareth",
+        "hierarchy": {
+          "parent": "Citrus Quarter",
+          "region": "Uppings"
+        },
+        "narrativeRole": "Information sanctuary disguised as indulgence",
+        "visualIdentity": {
+          "keyElements": ["low cushions", "hookah smoke", "tea service", "rugs"],
+          "lighting": "Lantern-warm, honeyed glow",
+          "materials": "Fabric, brass, glass, wood",
+          "colorPalette": "Gold, amber, citrus green, deep shadow brown"
+        },
+        "emotionalSignature": {
+          "primaryMood": "Intimate control",
+          "secondaryNotes": ["comfort", "trust", "calculated safety"],
+          "whatItPromises": "Rest and understanding",
+          "whatItThreatens": "Being known too well"
+        },
+        "usage": {
+          "storyImportance": "major",
+          "typicalScenes": ["strategy", "confessions", "quiet power plays"]
+        },
+        "aiStoryboardPrompt": "Storyboard illustration in Shadow Style, three-quarters overhead. A warm, lantern-lit lounge filled with rugs, cushions, hookah smoke, and tea service. Cinematic chiaroscuro with soft gold light and deep intimate shadows. The space should feel safe, indulgent, and quietly dangerous."
+      },
+      {
+        "id": "ori_apartment",
+        "type": "interior",
+        "name": "Ori’s Apartment",
+        "ownership": "Ori",
+        "hierarchy": {
+          "parent": "Uppings",
+          "region": "Residential quarter"
+        },
+        "narrativeRole": "Emotional ground zero",
+        "visualIdentity": {
+          "keyElements": ["crooked beams", "small fireplace", "keepsake ledge", "trunk"],
+          "lighting": "Soft window light and hearth glow",
+          "materials": "Old wood, stone, worn fabric",
+          "colorPalette": "Warm brown, ash gray, pale gold"
+        },
+        "emotionalSignature": {
+          "primaryMood": "Vulnerable refuge",
+          "secondaryNotes": ["loneliness", "tenderness", "memory"],
+          "whatItPromises": "Safety and quiet",
+          "whatItThreatens": "Being alone with your thoughts"
+        },
+        "usage": {
+          "storyImportance": "major",
+          "typicalScenes": ["intimacy", "healing", "emotional fallout"]
+        },
+        "aiStoryboardPrompt": "Three-quarters overhead storyboard in Shadow Style. A modest loft apartment with crooked beams, a small fireplace, sparse furniture, and personal keepsakes. Soft window light and deep shadows create a private, fragile sanctuary. Intimate, quiet, and emotionally charged."
+      }
+    ]
+  }
+}
+"@
+}
+
+function Show-SceneJsonTemplate {
+    param([object]$Settings)
+
+    $template = Get-SceneJsonTemplate
+    Write-Section 'Scene JSON template'
+    Write-Host $template
+    $saveChoice = (Read-Host 'Save this template to a file? (y/n)').Trim().ToLowerInvariant()
+    if ($saveChoice -notin @('y', 'yes')) {
+        return
+    }
+    $defaultPath = Join-Path $Settings.WorkspaceFolder 'scene-template.json'
+    $pathInput = (Read-Host ("Enter output path (default: {0})" -f $defaultPath)).Trim()
+    $outputPath = if ($pathInput) { Normalize-InputPath -Path $pathInput } else { $defaultPath }
+    if (-not [System.IO.Path]::IsPathRooted($outputPath)) {
+        $outputPath = Join-Path $Settings.WorkspaceFolder $outputPath
+    }
+    Set-Content -Path $outputPath -Value $template -Encoding UTF8
+    Write-Success ("Template saved to: {0}" -f $outputPath)
+}
+
+function Normalize-SceneJsonInput {
+    param([string]$JsonText)
+
+    if ([string]::IsNullOrWhiteSpace($JsonText)) {
+        return $JsonText
+    }
+
+    $trimmed = $JsonText.Trim()
+    if ($trimmed.StartsWith('"') -and $trimmed.EndsWith('"')) {
+        try {
+            $decoded = $trimmed | ConvertFrom-Json
+            if ($decoded -is [string]) {
+                $trimmed = $decoded
+            }
+        } catch {
+        }
+    }
+
+    if ($trimmed -match '\\n') {
+        $trimmed = $trimmed -replace '\\n', "`n"
+    }
+    if ($trimmed -match '\\t') {
+        $trimmed = $trimmed -replace '\\t', "`t"
+    }
+    return $trimmed
+}
+
+function Get-SceneWorldFromJson {
+    param([string]$JsonText)
+
+    $normalized = Normalize-SceneJsonInput -JsonText $JsonText
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        throw 'Scene JSON input was empty.'
+    }
+    try {
+        $parsed = $normalized | ConvertFrom-Json -Depth 12
+    } catch {
+        throw ("Scene JSON could not be parsed: {0}" -f $_.Exception.Message)
+    }
+    if (-not $parsed.World) {
+        throw 'Scene JSON must include a World object.'
+    }
+    if (-not $parsed.World.StoryNodes) {
+        throw 'Scene JSON must include World.StoryNodes.'
+    }
+    return $parsed.World
+}
+
+function Get-SceneNodeLabel {
+    param([object]$Node)
+
+    if ($Node.name) {
+        return $Node.name
+    }
+    if ($Node.id) {
+        return $Node.id
+    }
+    return 'Scene'
+}
+
+function Join-SceneArray {
+    param([object]$Values)
+
+    if (-not $Values) {
+        return $null
+    }
+    if ($Values -is [string]) {
+        return $Values
+    }
+    if ($Values -is [System.Collections.IEnumerable]) {
+        return ($Values | Where-Object { $_ } | ForEach-Object { $_.ToString() }) -join ', '
+    }
+    return $Values.ToString()
+}
+
+function Get-SceneImagePrompt {
+    param(
+        [object]$World,
+        [object]$Node
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($World.Name) { $lines.Add(("World: {0}" -f $World.Name)) }
+    if ($World.Tone) { $lines.Add(("Tone: {0}" -f $World.Tone)) }
+    if ($World.VisualStyle) { $lines.Add(("Visual style: {0}" -f $World.VisualStyle)) }
+
+    $nodeLabel = Get-SceneNodeLabel -Node $Node
+    $nodeId = if ($Node.id) { $Node.id } else { 'n/a' }
+    $nodeType = if ($Node.type) { $Node.type } else { 'scene' }
+    $lines.Add(("Story node: {0} (id: {1}, type: {2})" -f $nodeLabel, $nodeId, $nodeType))
+
+    if ($Node.narrativeRole) { $lines.Add(("Narrative role: {0}" -f $Node.narrativeRole)) }
+    if ($Node.ownership) { $lines.Add(("Ownership: {0}" -f $Node.ownership)) }
+    if ($Node.hierarchy) {
+        if ($Node.hierarchy.parent) { $lines.Add(("Hierarchy parent: {0}" -f $Node.hierarchy.parent)) }
+        if ($Node.hierarchy.region) { $lines.Add(("Hierarchy region: {0}" -f $Node.hierarchy.region)) }
+    }
+    if ($Node.visualIdentity) {
+        $elements = Join-SceneArray -Values $Node.visualIdentity.keyElements
+        if ($elements) { $lines.Add(("Key elements: {0}" -f $elements)) }
+        if ($Node.visualIdentity.lighting) { $lines.Add(("Lighting: {0}" -f $Node.visualIdentity.lighting)) }
+        if ($Node.visualIdentity.materials) { $lines.Add(("Materials: {0}" -f $Node.visualIdentity.materials)) }
+        if ($Node.visualIdentity.colorPalette) { $lines.Add(("Color palette: {0}" -f $Node.visualIdentity.colorPalette)) }
+    }
+    if ($Node.emotionalSignature) {
+        if ($Node.emotionalSignature.primaryMood) { $lines.Add(("Primary mood: {0}" -f $Node.emotionalSignature.primaryMood)) }
+        $notes = Join-SceneArray -Values $Node.emotionalSignature.secondaryNotes
+        if ($notes) { $lines.Add(("Secondary notes: {0}" -f $notes)) }
+        if ($Node.emotionalSignature.whatItPromises) { $lines.Add(("Promises: {0}" -f $Node.emotionalSignature.whatItPromises)) }
+        if ($Node.emotionalSignature.whatItThreatens) { $lines.Add(("Threatens: {0}" -f $Node.emotionalSignature.whatItThreatens)) }
+    }
+    if ($Node.usage) {
+        if ($Node.usage.storyImportance) { $lines.Add(("Story importance: {0}" -f $Node.usage.storyImportance)) }
+        $scenes = Join-SceneArray -Values $Node.usage.typicalScenes
+        if ($scenes) { $lines.Add(("Typical scenes: {0}" -f $scenes)) }
+    }
+    if ($Node.aiStoryboardPrompt) { $lines.Add(("Storyboard prompt: {0}" -f $Node.aiStoryboardPrompt)) }
+
+    return ($lines -join "`n")
+}
+
+function Invoke-OpenAISceneImage {
+    param(
+        [object]$World,
+        [object]$Node,
+        [string]$ApiKey,
+        [string]$OutputPath
+    )
+
+    $systemPrompt = @"
+You are an AI illustrator for a fantasy story. Generate a single image only, no text or markdown.
+Use the supplied story node details and storyboard prompt to design the image.
+Maintain the story vibe, characters, and DnD fantasy tone.
+Return only the image.
+"@
+
+    $userPrompt = Get-SceneImagePrompt -World $World -Node $Node
+
+    $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
+    $userPrompt = Convert-ToJsonSafeText -Text $userPrompt
+    $finalPrompt = @"
+$systemPrompt
+
+$ImageStyleGuidance
+
+$userPrompt
+"@
+
+    Invoke-OpenAIImageGeneration -Prompt $finalPrompt -ApiKey $ApiKey -OutputPath $OutputPath
+}
+
+function Select-SceneJsonInputMethod {
+    Clear-HostSafe
+    Write-Info 'Scene JSON input:'
+    Write-Host '  1) Load JSON file'
+    Write-Host '  2) Paste JSON text'
+    Write-Host '  3) Show template'
+    while ($true) {
+        $inputValue = (Read-Host 'Choose input type').Trim().ToLowerInvariant()
+        switch ($inputValue) {
+            '1' { return 'file' }
+            '2' { return 'text' }
+            '3' { return 'template' }
+            'file' { return 'file' }
+            'text' { return 'text' }
+            'template' { return 'template' }
+        }
+        Write-Warn 'Invalid selection. Enter 1, 2, or 3.'
+    }
+}
+
+function Select-SceneJsonFile {
+    param([object]$Settings)
+
+    $workspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $workspaceFolder
+    $candidates = Get-ChildItem -Path $workspaceFolder -File -Filter '*.json' | Sort-Object Name
+    Write-Info ("Working directory: {0}" -f $workspaceFolder)
+    if ($candidates.Count -gt 0) {
+        Write-Info 'JSON files available in working directory (numbered selections):'
+        for ($i = 0; $i -lt $candidates.Count; $i++) {
+            Write-Host ("  {0}) {1} ({2})" -f ($i + 1), $candidates[$i].Name, $candidates[$i].FullName)
+        }
+    } else {
+        Write-Warn 'No JSON files found in the working directory.'
+    }
+
+    $selection = Read-Host 'Enter file number, file name, or full path'
+    $selection = Normalize-InputPath -Path $selection
+    if ([string]::IsNullOrWhiteSpace($selection)) {
+        return $null
+    }
+
+    if ($selection -match '^\d+$') {
+        $index = [int]$selection - 1
+        if ($index -ge 0 -and $index -lt $candidates.Count) {
+            return $candidates[$index].FullName
+        }
+    }
+
+    $candidatePath = $selection
+    if (-not [System.IO.Path]::IsPathRooted($candidatePath)) {
+        $candidatePath = Join-Path $workspaceFolder $candidatePath
+    }
+
+    if (Test-Path -LiteralPath $candidatePath) {
+        $item = Get-Item -LiteralPath $candidatePath
+        if (-not $item.PSIsContainer -and $item.Extension.ToLowerInvariant() -eq '.json') {
+            return $item.FullName
+        }
+    }
+
+    Write-Warn 'Selection did not match a readable JSON file.'
+    return $null
+}
+
+function Invoke-SceneImageGeneration {
+    param([object]$Settings)
+
+    $Settings.WorkspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    $apiKey = Get-ApiKey -Settings $Settings
+
+    $world = $null
+    while (-not $world) {
+        $inputMethod = Select-SceneJsonInputMethod
+        if ($inputMethod -eq 'template') {
+            Show-SceneJsonTemplate -Settings $Settings
+            $continueChoice = (Read-Host 'Press Enter to continue or type "back" to return').Trim().ToLowerInvariant()
+            if ($continueChoice -eq 'back') {
+                return
+            }
+            continue
+        }
+
+        if ($inputMethod -eq 'file') {
+            $jsonPath = Select-SceneJsonFile -Settings $Settings
+            if (-not $jsonPath) {
+                Write-Warn 'No JSON file selected.'
+                continue
+            }
+            $jsonText = Get-Content -Path $jsonPath -Raw
+        } else {
+            Write-Info 'Paste scene JSON below. Enter a single line with END to finish.'
+            $jsonText = Read-PastedText
+        }
+
+        try {
+            $world = Get-SceneWorldFromJson -JsonText $jsonText
+        } catch {
+            Write-ErrorMessage $_.Exception.Message
+            $world = $null
+        }
+    }
+
+    $storyNodes = $world.StoryNodes
+    if (-not $storyNodes -or $storyNodes.Count -eq 0) {
+        Write-Warn 'No StoryNodes found in the scene JSON.'
+        return
+    }
+
+    $sceneImagesFolder = Join-Path $Settings.WorkspaceFolder 'SceneImages'
+    Ensure-WorkspaceFolder -Path $sceneImagesFolder
+
+    $index = 0
+    foreach ($node in $storyNodes) {
+        $index++
+        $nodeLabel = Get-SceneNodeLabel -Node $node
+        $baseName = if ($node.id) { $node.id } elseif ($node.name) { $node.name } else { "scene_$index" }
+        $cleanName = Sanitize-FileName -Name $baseName
+        if (-not $cleanName) {
+            $cleanName = "scene_$index"
+        }
+        $sceneIndex = $index.ToString('D3')
+        $outputPath = Join-Path $sceneImagesFolder ("{0}_{1}.png" -f $sceneIndex, $cleanName)
+        Write-Info ("Generating scene image: {0} -> {1}" -f $nodeLabel, $outputPath)
+        Invoke-OpenAISceneImage -World $world -Node $node -ApiKey $apiKey -OutputPath $outputPath
+        Write-Success ("Saved scene image: {0}" -f $outputPath)
     }
 }
 
@@ -2030,6 +2310,7 @@ while ($true) {
     Write-Host '1) Create audio'
     Write-Host '2) Split book into chapters/scenes'
     Write-Host '3) Generate chapter imagery'
+    Write-Host '4) Generate scene pictures'
     Write-Host '9) Settings'
     Write-Host '0) Exit'
     $selection = (Read-Host 'Choose an option').Trim()
@@ -2113,6 +2394,14 @@ while ($true) {
         '3' {
             try {
                 Invoke-ChapterImageGeneration -Settings $settings
+            } catch {
+                Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
+            }
+            Read-Host 'Press Enter to return to the main menu'
+        }
+        '4' {
+            try {
+                Invoke-SceneImageGeneration -Settings $settings
             } catch {
                 Write-ErrorMessage ("Error: {0}" -f $_.Exception.Message)
             }
