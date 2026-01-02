@@ -530,12 +530,12 @@ function Normalize-TextForJson {
     $normalized = $normalized.Replace([char]0x00A0, ' ')
     $normalized = $normalized.Replace([char]0x2028, "`n")
     $normalized = $normalized.Replace([char]0x2029, "`n")
-    $normalized = $normalized.Replace([char]0x00AD, '')
-    $normalized = $normalized.Replace([char]0xFEFF, '')
-    $normalized = $normalized.Replace([char]0x200B, '')
-    $normalized = $normalized.Replace([char]0x200C, '')
-    $normalized = $normalized.Replace([char]0x200D, '')
-    $normalized = $normalized.Replace([char]0x2060, '')
+    $normalized = $normalized.Replace([string][char]0x00AD, '')
+    $normalized = $normalized.Replace([string][char]0xFEFF, '')
+    $normalized = $normalized.Replace([string][char]0x200B, '')
+    $normalized = $normalized.Replace([string][char]0x200C, '')
+    $normalized = $normalized.Replace([string][char]0x200D, '')
+    $normalized = $normalized.Replace([string][char]0x2060, '')
     $normalized = $normalized.Normalize([System.Text.NormalizationForm]::FormC)
 
     return $normalized
