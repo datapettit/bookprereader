@@ -1516,6 +1516,74 @@ function Select-SceneJsonFile {
     return $null
 }
 
+function Get-SceneImageInputText {
+    param([object]$Settings)
+
+    $workspaceFolder = Resolve-WorkspaceFolder -Path $Settings.WorkspaceFolder
+    Ensure-WorkspaceFolder -Path $workspaceFolder
+
+    while ($true) {
+        Write-Info 'Enter a full filename to load scene text, or press Enter to paste text.'
+        $selection = Read-Host 'Filename (blank to paste)'
+        $selection = Normalize-InputPath -Path $selection
+        if ([string]::IsNullOrWhiteSpace($selection)) {
+            return Read-PastedText
+        }
+
+        if (-not [System.IO.Path]::IsPathRooted($selection)) {
+            $selection = Join-Path $workspaceFolder $selection
+        }
+        if (Test-Path -LiteralPath $selection) {
+            return Get-TextFromFile -Path $selection
+        }
+        Write-Warn ("File not found: {0}" -f $selection)
+    }
+}
+
+function Get-ShortTitleFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $words = $Text -split '\s+' | Where-Object { $_ }
+    if ($words.Count -eq 0) {
+        return $null
+    }
+    $candidate = ($words | Select-Object -First 6) -join ' '
+    return $candidate.Trim()
+}
+
+function Invoke-OpenAISceneImageFromText {
+    param(
+        [string]$InputText,
+        [string]$ApiKey,
+        [string]$OutputPath
+    )
+
+    $systemPrompt = @"
+You are an AI illustrator for a fantasy story. Generate a single image only, no text or markdown.
+Use the supplied scene description to design the image.
+Maintain the story vibe, characters, and DnD fantasy tone.
+Return only the image.
+"@
+
+    $safeText = Convert-ToJsonSafeText -Text $InputText
+    $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
+    $userPrompt = Convert-ToJsonSafeText -Text ("Scene description:`n{0}" -f $safeText)
+    $finalPrompt = @"
+$systemPrompt
+
+$ImageStyleGuidance
+
+$userPrompt
+"@
+
+    $finalPrompt = Ensure-ImagePromptWithinLimit -Prompt $finalPrompt -ApiKey $ApiKey -MaxCharacters $ImagePromptMaxCharacters -MaxAttempts $ImagePromptReductionAttempts
+    Invoke-OpenAIImageGeneration -Prompt $finalPrompt -ApiKey $ApiKey -OutputPath $OutputPath
+}
+
 function Invoke-SceneImageGeneration {
     param([object]$Settings)
 
@@ -1523,62 +1591,32 @@ function Invoke-SceneImageGeneration {
     Ensure-WorkspaceFolder -Path $Settings.WorkspaceFolder
     $apiKey = Get-ApiKey -Settings $Settings
 
-    $world = $null
-    while (-not $world) {
-        $inputMethod = Select-SceneJsonInputMethod
-        if ($inputMethod -eq 'template') {
-            Show-SceneJsonTemplate -Settings $Settings
-            $continueChoice = (Read-Host 'Press Enter to continue or type "back" to return').Trim().ToLowerInvariant()
-            if ($continueChoice -eq 'back') {
-                return
-            }
-            continue
-        }
-
-        if ($inputMethod -eq 'file') {
-            $jsonPath = Select-SceneJsonFile -Settings $Settings
-            if (-not $jsonPath) {
-                Write-Warn 'No JSON file selected.'
-                continue
-            }
-            $jsonText = Get-Content -Path $jsonPath -Raw
-        } else {
-            Write-Info 'Paste scene JSON below. Enter a single line with END to finish.'
-            $jsonText = Read-PastedText
-        }
-
-        try {
-            $world = Get-SceneWorldFromJson -JsonText $jsonText
-        } catch {
-            Write-ErrorMessage $_.Exception.Message
-            $world = $null
-        }
-    }
-
-    $storyNodes = $world.StoryNodes
-    if (-not $storyNodes -or $storyNodes.Count -eq 0) {
-        Write-Warn 'No StoryNodes found in the scene JSON.'
-        return
-    }
-
     $sceneImagesFolder = Join-Path $Settings.WorkspaceFolder 'SceneImages'
     Ensure-WorkspaceFolder -Path $sceneImagesFolder
 
-    $index = 0
-    foreach ($node in $storyNodes) {
-        $index++
-        $nodeLabel = Get-SceneNodeLabel -Node $node
-        $baseName = if ($node.id) { $node.id } elseif ($node.name) { $node.name } else { "scene_$index" }
-        $cleanName = Sanitize-FileName -Name $baseName
-        if (-not $cleanName) {
-            $cleanName = "scene_$index"
-        }
-        $sceneIndex = $index.ToString('D3')
-        $outputPath = Join-Path $sceneImagesFolder ("{0}_{1}.png" -f $sceneIndex, $cleanName)
-        Write-Info ("Generating scene image: {0} -> {1}" -f $nodeLabel, $outputPath)
-        Invoke-OpenAISceneImage -World $world -Node $node -ApiKey $apiKey -OutputPath $outputPath
-        Write-Success ("Saved scene image: {0}" -f $outputPath)
+    $inputText = Get-SceneImageInputText -Settings $Settings
+    if ([string]::IsNullOrWhiteSpace($inputText)) {
+        Write-Warn 'No scene text provided.'
+        return
     }
+
+    $safeText = Convert-ToJsonSafeText -Text $inputText
+    $titleSeed = Trim-TextToJsonLength -Text $safeText -MaxCharacters $MaxInputCharacters
+    $generatedTitle = Invoke-OpenAISceneTitle -Text $titleSeed -ApiKey $apiKey -Type 'scene image' -ExistingTitles @()
+    if ($generatedTitle) {
+        $generatedTitle = Convert-ToTitleCase -Text $generatedTitle
+    }
+    $fallbackTitle = Get-ShortTitleFromText -Text $safeText
+    $finalTitle = if ($generatedTitle) { $generatedTitle } else { $fallbackTitle }
+    $cleanTitle = Sanitize-FileName -Name $finalTitle
+    if (-not $cleanTitle) {
+        $cleanTitle = 'scene'
+    }
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $outputPath = Join-Path $sceneImagesFolder ("scene_{0}_{1}.png" -f $timestamp, $cleanTitle)
+    Write-Info ("Generating scene image: {0}" -f $outputPath)
+    Invoke-OpenAISceneImageFromText -InputText $safeText -ApiKey $apiKey -OutputPath $outputPath
+    Write-Success ("Saved scene image: {0}" -f $outputPath)
 }
 
 function Ensure-Ffmpeg {
