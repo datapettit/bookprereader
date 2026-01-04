@@ -2,8 +2,8 @@ $ErrorActionPreference = 'Stop'
 cls
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SettingsPath = Join-Path $ScriptRoot 'settings.json'
-$MaxInputCharacters = 3900
-$ImagePromptMaxCharacters = 3500
+$MaxInputCharacters = 3300
+$ImagePromptMaxCharacters = 3300
 $ImagePromptReductionAttempts = 3
 $SupportedModels = @('gpt-4o-mini-tts')
 $SupportedVoices = @('alloy', 'ash', 'echo', 'fable', 'onyx', 'nova', 'shimmer')
@@ -585,6 +585,22 @@ function Convert-ToJsonSafeText {
     return $normalized
 }
 
+function Convert-ToBasicText {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    $normalized = Convert-ToJsonSafeText -Text $Text
+    if ($null -eq $normalized) {
+        return $normalized
+    }
+
+    $normalized = $normalized -replace '[^\p{L}\p{M}\p{N}\p{P}\p{Zs}\r\n\t]', ''
+    return $normalized
+}
+
 function Get-JsonEncodedLength {
     param([string]$Text)
 
@@ -832,8 +848,8 @@ function Invoke-OpenAITts {
     if ($Instructions -eq "" -OR  $Instructions -eq $null){   $Instructions = "Novel storyteller narrtor, dynamic and vibrant, feelings and depth." }
 
 
-    $safeText = Convert-ToJsonSafeText -Text $Text
-    $safeInstructions = Convert-ToJsonSafeText -Text $Instructions
+    $safeText = Convert-ToBasicText -Text $Text
+    $safeInstructions = Convert-ToBasicText -Text $Instructions
     $bodyObject = @{
         model = $Model
         input = $safeText
