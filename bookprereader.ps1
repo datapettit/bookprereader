@@ -635,14 +635,16 @@ function Invoke-OpenAIImagePromptReduction {
     )
 
     $safePrompt = Convert-ToJsonSafeText -Text $Prompt
+    $systemMessage = Convert-ToJsonSafeText -Text 'You shorten prompts for image generation. Return only the revised prompt text without quotes or markdown.'
+    $userMessage = Convert-ToJsonSafeText -Text ("Reduce the prompt to {0} characters or fewer while keeping essential visual details, tone, and style. Return only the prompt text.`n`nPrompt:`n{1}" -f $MaxCharacters, $safePrompt)
     $currentLength = Get-JsonSafeLength -Text $safePrompt
     Write-Info ("Reducing image prompt length (attempt {0}): {1} -> {2} chars." -f $Attempt, $currentLength, $MaxCharacters)
 
     $body = @{
         model = 'gpt-4o-mini'
         messages = @(
-            @{ role = 'system'; content = 'You shorten prompts for image generation. Return only the revised prompt text without quotes or markdown.' }
-            @{ role = 'user'; content = ("Reduce the prompt to {0} characters or fewer while keeping essential visual details, tone, and style. Return only the prompt text.`n`nPrompt:`n{1}" -f $MaxCharacters, $safePrompt) }
+            @{ role = 'system'; content = $systemMessage }
+            @{ role = 'user'; content = $userMessage }
         )
         temperature = 0.2
         max_tokens = 700
@@ -654,7 +656,7 @@ function Invoke-OpenAIImagePromptReduction {
         throw 'OpenAI prompt reduction returned empty content.'
     }
 
-    $reducedPrompt = $reducedPrompt.Trim()
+    $reducedPrompt = (Convert-ToJsonSafeText -Text $reducedPrompt).Trim()
     $newLength = Get-JsonSafeLength -Text $reducedPrompt
     Write-Info ("Prompt reduction attempt {0} result length: {1} chars." -f $Attempt, $newLength)
     return $reducedPrompt
