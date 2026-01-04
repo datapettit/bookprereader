@@ -601,6 +601,21 @@ function Convert-ToBasicText {
     return $normalized
 }
 
+function Convert-ToApiSafeText {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    $normalized = Convert-ToJsonSafeText -Text $Text
+    if ($null -eq $normalized) {
+        return $normalized
+    }
+    $normalized = $normalized -replace '[^\p{L}\p{M}\p{N}\p{P}\p{Zs}\r\n\t]', ''
+    return $normalized
+}
+
 function Get-JsonEncodedLength {
     param([string]$Text)
 
@@ -650,10 +665,10 @@ function Invoke-OpenAIImagePromptReduction {
         [int]$Attempt
     )
 
-    $safePrompt = Convert-ToJsonSafeText -Text $Prompt
-    $systemMessage = Convert-ToJsonSafeText -Text 'You shorten prompts for image generation. Return only the revised prompt text without quotes or markdown.'
-    $userMessage = Convert-ToJsonSafeText -Text ("Reduce the prompt to {0} characters or fewer while keeping essential visual details, tone, and style. Return only the prompt text.`n`nPrompt:`n{1}" -f $MaxCharacters, $safePrompt)
-    $currentLength = Get-JsonSafeLength -Text $safePrompt
+    $safePrompt = Convert-ToApiSafeText -Text $Prompt
+    $systemMessage = Convert-ToApiSafeText -Text 'You shorten prompts for image generation. Return only the revised prompt text without quotes or markdown.'
+    $userMessage = Convert-ToApiSafeText -Text ("Reduce the prompt to {0} characters or fewer while keeping essential visual details, tone, and style. Return only the prompt text.`n`nPrompt:`n{1}" -f $MaxCharacters, $safePrompt)
+    $currentLength = Get-JsonEncodedLength -Text $safePrompt
     Write-Info ("Reducing image prompt length (attempt {0}): {1} -> {2} chars." -f $Attempt, $currentLength, $MaxCharacters)
 
     $body = @{
@@ -672,8 +687,8 @@ function Invoke-OpenAIImagePromptReduction {
         throw 'OpenAI prompt reduction returned empty content.'
     }
 
-    $reducedPrompt = (Convert-ToJsonSafeText -Text $reducedPrompt).Trim()
-    $newLength = Get-JsonSafeLength -Text $reducedPrompt
+    $reducedPrompt = (Convert-ToApiSafeText -Text $reducedPrompt).Trim()
+    $newLength = Get-JsonEncodedLength -Text $reducedPrompt
     Write-Info ("Prompt reduction attempt {0} result length: {1} chars." -f $Attempt, $newLength)
     return $reducedPrompt
 }
@@ -686,15 +701,15 @@ function Ensure-ImagePromptWithinLimit {
         [int]$MaxAttempts
     )
 
-    $currentPrompt = Convert-ToJsonSafeText -Text $Prompt
-    $currentLength = Get-JsonSafeLength -Text $currentPrompt
+    $currentPrompt = Convert-ToApiSafeText -Text $Prompt
+    $currentLength = Get-JsonEncodedLength -Text $currentPrompt
     if ($currentLength -le $MaxCharacters) {
         return $currentPrompt
     }
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         $currentPrompt = Invoke-OpenAIImagePromptReduction -Prompt $currentPrompt -ApiKey $ApiKey -MaxCharacters $MaxCharacters -Attempt $attempt
-        $currentLength = Get-JsonSafeLength -Text $currentPrompt
+        $currentLength = Get-JsonEncodedLength -Text $currentPrompt
         if ($currentLength -le $MaxCharacters) {
             return $currentPrompt
         }
@@ -848,8 +863,8 @@ function Invoke-OpenAITts {
     if ($Instructions -eq "" -OR  $Instructions -eq $null){   $Instructions = "Novel storyteller narrtor, dynamic and vibrant, feelings and depth." }
 
 
-    $safeText = Convert-ToBasicText -Text $Text
-    $safeInstructions = Convert-ToBasicText -Text $Instructions
+    $safeText = Convert-ToApiSafeText -Text $Text
+    $safeInstructions = Convert-ToApiSafeText -Text $Instructions
     $bodyObject = @{
         model = $Model
         input = $safeText
@@ -858,6 +873,7 @@ function Invoke-OpenAITts {
     }
     
     $body = $bodyObject | ConvertTo-Json -Depth 4
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
 
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force
@@ -865,7 +881,7 @@ function Invoke-OpenAITts {
 
     for ($attempt = 0; $attempt -le 2; $attempt++) {
         try {
-            $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -OutFile $OutputPath -PassThru -ErrorAction Stop
+            $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $bodyBytes -ContentType 'application/json; charset=utf-8' -OutFile $OutputPath -PassThru -ErrorAction Stop
 
             return
         } catch {
@@ -1001,8 +1017,9 @@ function Invoke-OpenAIJsonRequest {
         "Content-Type"  = "application/json"
     }
     $jsonBody = $Body | ConvertTo-Json -Depth 10
+    $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
     try {
-        return Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonBody -ContentType 'application/json'
+        return Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonBytes -ContentType 'application/json; charset=utf-8'
     } catch {
         Write-Warn $_.Exception
         if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
@@ -1048,8 +1065,8 @@ function Invoke-OpenAIImageGeneration {
         throw 'Image prompt cannot be empty.'
     }
 
-    $safePrompt = Convert-ToJsonSafeText -Text $Prompt
-    $promptLength = Get-JsonSafeLength -Text $safePrompt
+    $safePrompt = Convert-ToApiSafeText -Text $Prompt
+    $promptLength = Get-JsonEncodedLength -Text $safePrompt
     Write-Info ("Calling OpenAI image generation. Prompt length: {0} chars." -f $promptLength)
     $body = @{
         model = 'gpt-image-1'
@@ -1123,12 +1140,13 @@ Story text:
 $ChapterText
 "@
 
-    $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
-    $userPrompt = Convert-ToJsonSafeText -Text $userPrompt
+    $systemPrompt = Convert-ToApiSafeText -Text $systemPrompt
+    $userPrompt = Convert-ToApiSafeText -Text $userPrompt
+    $styleGuidance = Convert-ToApiSafeText -Text $ImageStyleGuidance
     $finalPrompt = @"
 $systemPrompt
 
-$ImageStyleGuidance
+$styleGuidance
 
 $userPrompt
 "@
@@ -1453,12 +1471,13 @@ Return only the image.
 
     $userPrompt = Get-SceneImagePrompt -World $World -Node $Node
 
-    $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
-    $userPrompt = Convert-ToJsonSafeText -Text $userPrompt
+    $systemPrompt = Convert-ToApiSafeText -Text $systemPrompt
+    $userPrompt = Convert-ToApiSafeText -Text $userPrompt
+    $styleGuidance = Convert-ToApiSafeText -Text $ImageStyleGuidance
     $finalPrompt = @"
 $systemPrompt
 
-$ImageStyleGuidance
+$styleGuidance
 
 $userPrompt
 "@
@@ -1585,13 +1604,14 @@ Maintain the story vibe, characters, and DnD fantasy tone.
 Return only the image.
 "@
 
-    $safeText = Convert-ToJsonSafeText -Text $InputText
-    $systemPrompt = Convert-ToJsonSafeText -Text $systemPrompt
-    $userPrompt = Convert-ToJsonSafeText -Text ("Scene description:`n{0}" -f $safeText)
+    $safeText = Convert-ToApiSafeText -Text $InputText
+    $systemPrompt = Convert-ToApiSafeText -Text $systemPrompt
+    $userPrompt = Convert-ToApiSafeText -Text ("Scene description:`n{0}" -f $safeText)
+    $styleGuidance = Convert-ToApiSafeText -Text $ImageStyleGuidance
     $finalPrompt = @"
 $systemPrompt
 
-$ImageStyleGuidance
+$styleGuidance
 
 $userPrompt
 "@
@@ -1616,7 +1636,7 @@ function Invoke-SceneImageGeneration {
         return
     }
 
-    $safeText = Convert-ToJsonSafeText -Text $inputText
+    $safeText = Convert-ToApiSafeText -Text $inputText
     $titleSeed = Trim-TextToJsonLength -Text $safeText -MaxCharacters $MaxInputCharacters
     $generatedTitle = Invoke-OpenAISceneTitle -Text $titleSeed -ApiKey $apiKey -Type 'scene image' -ExistingTitles @()
     if ($generatedTitle) {
@@ -2227,28 +2247,29 @@ function Invoke-OpenAISceneTitle {
         "Authorization" = "Bearer $ApiKey"
         "Content-Type"  = "application/json"
     }
-    $safeText = Normalize-TextForJson -Text $Text
+    $safeText = Convert-ToApiSafeText -Text $Text
     $priorTitles = $null
     if ($ExistingTitles -and $ExistingTitles.Count -gt 0) {
         $priorTitles = ($ExistingTitles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 50)
     }
-    $prompt = "Create a short, punchy $Type title (3-8 words) based on the content. Respond with the title only."
+    $prompt = Convert-ToApiSafeText -Text ("Create a short, punchy {0} title (3-8 words) based on the content. Respond with the title only." -f $Type)
     if ($priorTitles) {
-        $prompt += "`nAvoid repeating or sounding too similar to these existing titles:`n- " + ($priorTitles -join "`n- ")
+        $prompt += Convert-ToApiSafeText -Text ("`nAvoid repeating or sounding too similar to these existing titles:`n- " + ($priorTitles -join "`n- "))
     }
     $bodyObject = @{
         model = 'gpt-4o-mini'
         messages = @(
-            @{ role = 'system'; content = 'You create concise scene and chapter titles.' },
-            @{ role = 'user'; content = "$prompt`n`nContent:`n$safeText" }
+            @{ role = 'system'; content = (Convert-ToApiSafeText -Text 'You create concise scene and chapter titles.') },
+            @{ role = 'user'; content = (Convert-ToApiSafeText -Text ("$prompt`n`nContent:`n$safeText")) }
         )
         temperature = 0.6
         max_tokens = 20
     }
     $body = $bodyObject | ConvertTo-Json -Depth 6
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
 
     try {
-        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $body -ContentType 'application/json' -ErrorAction Stop
+        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $bodyBytes -ContentType 'application/json; charset=utf-8' -ErrorAction Stop
         $title = $response.choices[0].message.content
         if ($title) {
             return $title.Trim().Trim('"')
@@ -2406,7 +2427,10 @@ function Invoke-TtsForText {
         throw 'Chapter name cannot be blank after cleaning.'
     }
 
-    $text = $InputText.Trim()
+    $text = Convert-ToApiSafeText -Text $InputText
+    if ($text) {
+        $text = $text.Trim()
+    }
     if (-not $text) {
         throw 'No text provided.'
     }
