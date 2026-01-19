@@ -151,7 +151,7 @@ function Get-VoiceProfile {
                 PovName = 'Lucien'
                 VoiceName = 'Lucien'
                 Voice = 'ash'
-                Instructions = 'Speak with effortless charm and dark warmth, words rolling smoothly with a faint Latin cadence and playful confidence. His voice carries humor, sarcasm, and lived-in sensuality as armor, flirtation as instinct, hyet there is a dangerous sincerity beneath it all. Let the tone smile even when the meaning cuts, romantic and shadowed, like someone who laughs easily because hes seen worse.'
+                Instructions = 'Smooth, controlled confidence with a faint audible smirk. Brisk pace for banter and crowds, slower and lower for threats, vows, or private moments; humor is armor, never goofy. When protective or violent, go quiet and precise, calm danger, minimal volume changes.'
                 WasDetected = $wasDetected
             }
         }
@@ -160,7 +160,7 @@ function Get-VoiceProfile {
                 PovName = 'Elias'
                 VoiceName = 'Elias'
                 Voice = 'onyx'
-                Instructions = 'Speak with measured clarity and gentle authority, as someone used to thinking three steps ahead and keeping others steady. His tone is calm, reassuring, and quietly upbeat, even when concern runs deep, Âworry is present, but never allowed to panic the room. Let warmth come through restraint: a healer who believes composure is care, and who smiles lightly so others dont have to carry his fear.'
+                Instructions = 'Measured calm and quiet authority with steady pacing and careful diction. Deliver healing or diagnosis like a clinician in crisis, clear and grounding, warmth under restraint. Emotion leaks only in small pauses or softer words, dry humor is rare and deadpan.'
                 WasDetected = $wasDetected
             }
         }
@@ -178,7 +178,7 @@ function Get-VoiceProfile {
                 PovName = 'Ori'
                 VoiceName = 'Ori'
                 Voice = 'nova'
-                Instructions = 'Speak softly with a warm island cadence, vowels rounded and gentle, as if the ocean still lives in her breath. Theres restraint in every line. shes careful not to take up too much space yet an undercurrent of longing leaks through, a need to be useful, to be good, to belong without being a burden. Let vulnerability sit just beneath the words, like pressure held behind the ribs, breaking through only in quiet pauses or softened ends of sentences.'
+                Instructions = 'Tropical, Exotic, slightly nonnative. wanting, Warm, vivid, quick wit with fast conversational pacing, then slow down on fear, desire, or loneliness. Fluster shows as a brief breath hitch then a cover joke; Radiance control lines are rhythmic and breath-led, grounded and restrained. Never naive, keep her competent and street-tough.'
                 WasDetected = $wasDetected
             }
         }
